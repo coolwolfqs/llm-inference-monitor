@@ -1,0 +1,30 @@
+# LLM Inference Monitor - Configuration
+# Copy this to config.yaml and customize for your deployment
+
+# Server settings
+server:
+  host: 0.0.0.0
+  port: 8081
+  debug: false
+
+# Admin security (CHANGE THIS in production!)
+admin_key: changeme
+
+# Service endpoints (configure for your deployment)
+inference:
+  host: 127.0.0.1
+  port: 8080
+
+services:
+  model_manager_url: http://127.0.0.1:8093
+  cluster_url: http://127.0.0.1:8082
+  new_api_url: http://127.0.0.1:3000
+  benchmark_url: http://127.0.0.1:8090
+  searxng_url: http://127.0.0.1:8888
+
+# Data redaction settings
+redaction:
+  # Options: partial, full, none
+  ip_mode: partial
+  # Custom IP placeholder prefix for 'partial' mode
+  ip_prefix: "192.168"

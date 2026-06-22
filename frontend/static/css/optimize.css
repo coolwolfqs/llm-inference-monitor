@@ -1,0 +1,20 @@
+/* optimize.css - Responsive adjustments */
+@media (max-width: 992px) {
+  .kv-panel-summary { display: flex !important; flex-wrap: wrap !important; gap: 4px 8px !important; }
+  .kv-panel-summary .kv-summary-item { width: calc(50% - 8px) !important; flex: none !important; }
+  .gpu-detail-meta-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+  .sub-row.r2 .info-panel { display: grid !important; grid-template-columns: 1fr 1fr !important; gap: 2px 8px !important; }
+  .sub-row.r2 .info-panel h3 { grid-column: 1 / -1 !important; }
+  .net-layout { grid-template-columns: 1fr !important; }
+  .svc-overview-grid { grid-template-columns: 1fr !important; }
+  .chart-row.r2 { grid-template-columns: 1fr !important; }
+  .health-grid { grid-template-columns: 1fr 1fr !important; }
+  .kv-cards-row { grid-template-columns: 1fr !important; }
+}
+
+@media (max-width: 600px) {
+  .header { flex-direction: column; gap: 6px; }
+  .header .info { flex-wrap: wrap; justify-content: center; }
+  .core-grid.c16 { grid-template-columns: repeat(4, 1fr) !important; }
+  .svc-validation-grid { grid-template-columns: 1fr !important; }
+}

@@ -1,0 +1,208 @@
+/* components.css - Buttons, Tables, Badges, Dropdowns */
+.header .act-btn,
+.header .persist-btn {
+  padding: 4px 12px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text2);
+  font-size: 10px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: 0.2s;
+  white-space: nowrap;
+}
+
+.header .act-btn:hover,
+.header .persist-btn:hover { background: var(--hover-bg); color: var(--accent); border-color: var(--accent); }
+
+.header .sys-dropdown { position: relative; }
+.header .sys-menu {
+  display: none;
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  z-index: 1000;
+  min-width: 180px;
+  overflow: hidden;
+  padding: 4px 0;
+}
+.header .sys-menu.show { display: block; }
+.header .sys-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 14px;
+  background: none;
+  border: none;
+  color: var(--text2);
+  font-size: 11px;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+  transition: 0.15s;
+}
+.header .sys-menu-item:hover { background: var(--hover-bg); color: var(--text); }
+.header .sys-menu-item.danger { color: var(--red); }
+.header .sys-menu-item.danger:hover { background: rgba(248,81,73,0.1); }
+.header .sys-menu-item.warn { color: var(--accent); }
+.header .sys-menu-item.warn:hover { background: rgba(88,166,255,0.1); }
+
+/* Persist button */
+.persist-btn .p-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); display: inline-block; transition: 0.3s; }
+.persist-btn .p-dot.manual { background: var(--yellow); }
+.persist-btn.busy { opacity: 0.5; pointer-events: none; }
+
+/* Connection status */
+.conn-status { font-size: 10px; display: inline-flex; align-items: center; gap: 3px; }
+.conn-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+.conn-dot.on { background: var(--green); }
+.conn-dot.off { background: var(--red); animation: blink 1s infinite; }
+.conn-status.disconnected { color: var(--red); }
+
+/* Service validation cards */
+.svc-validation-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.svc-check-card { padding: 6px 8px; border-radius: 4px; border-left: 3px solid var(--green); background: var(--bg); font-size: 9.5px; }
+.svc-check-card.bad { border-left-color: var(--red); }
+.svc-check-card.warn { border-left-color: var(--yellow); }
+.svc-check-head { font-size: 9px; color: var(--text3); margin-bottom: 2px; }
+.svc-check-main { color: var(--text); font-weight: 500; margin-bottom: 1px; }
+.svc-check-detail { color: var(--text3); font-size: 8.5px; }
+
+/* GPU Card (mini) */
+.gpu-card { background: var(--bg); border: 1px solid var(--border2); border-radius: 5px; padding: 8px; margin-bottom: 8px; }
+.gpu-name-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.gpu-chip { width: 8px; height: 8px; border-radius: 2px; background: var(--accent); }
+.gpu-name-text { font-size: 11px; font-weight: 600; }
+.gpu-bar-row { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
+.gpu-bar-label { display: flex; justify-content: space-between; width: 60px; font-size: 9px; color: var(--text3); flex-shrink: 0; }
+.gpu-bar { flex: 1; height: 6px; background: var(--border2); border-radius: 3px; }
+.gpu-bar-fill { height: 100%; border-radius: 3px; transition: width 0.5s; }
+.gpu-bar-fill.cyan { background: var(--cyan); }
+.gpu-bar-fill.blue { background: var(--accent); }
+.gpu-bar-fill.green { background: var(--green); }
+.gpu-bar-fill.yellow { background: var(--yellow); }
+.gpu-bar-fill.purple { background: var(--purple); }
+
+/* System Card (mini) */
+.sys-card { background: var(--bg); border: 1px solid var(--border2); border-radius: 5px; padding: 8px; }
+.sys-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
+.sys-cell { text-align: center; }
+.sl { font-size: 8px; color: var(--text3); text-transform: uppercase; }
+.sv { font-size: 18px; font-weight: 700; font-family: 'Courier New', monospace; }
+.su { font-size: 10px; font-weight: 400; color: var(--text3); }
+
+/* Empty state */
+.svc-empty { text-align: center; padding: 20px; color: var(--text3); font-size: 11px; }
+
+/* models.css - Model banner, tags, info */
+.model-info-toggle { padding: 4px 12px; font-size: 10px; color: var(--accent); cursor: pointer; text-align: center; }
+.mi-file { font-size: 10px; color: var(--text3); word-break: break-all; margin-bottom: 6px; font-family: monospace; }
+.mi-section { margin: 6px 0; }
+.mi-label { font-size: 9px; color: var(--text3); text-transform: uppercase; margin-bottom: 3px; }
+.mi-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.mi-tag { padding: 2px 6px; border-radius: 3px; font-size: 9px; font-weight: 500; }
+.mi-tag.arch { background: rgba(88,166,255,0.1); color: #58a6ff; }
+.mi-tag.param { background: rgba(210,168,255,0.1); color: #d2a8ff; }
+.mi-tag.quant { background: rgba(63,185,80,0.1); color: #3fb950; }
+.mi-tag.lbl { background: rgba(139,148,158,0.1); color: #8b949e; }
+
+/* Engine cards */
+.engine-card { border: 1px solid var(--border2); border-radius: 6px; overflow: hidden; min-width: 200px; flex: 1; }
+.engine-card.engine-active { border-color: var(--accent); }
+.engine-card-header { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; cursor: pointer; background: rgba(13,17,23,0.2); }
+.engine-card-left { display: flex; align-items: center; gap: 6px; }
+.engine-status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text3); }
+.engine-status-dot.active { background: var(--green); }
+.engine-key { font-size: 12px; font-weight: 600; }
+.engine-badge { font-size: 8px; padding: 1px 5px; border-radius: 3px; background: rgba(88,166,255,0.15); color: var(--accent); text-transform: uppercase; }
+.engine-card-body { display: none; padding: 6px 10px; font-size: 10px; }
+.engine-card-body.show { display: block; }
+.engine-detail-row { display: flex; justify-content: space-between; padding: 2px 0; }
+.engine-detail-label { color: var(--text3); }
+.engine-detail-value { color: var(--text); font-weight: 500; }
+.engine-expand-icon { transition: transform 0.2s; font-size: 8px; color: var(--text3); }
+.engine-expand-icon.expanded { transform: rotate(180deg); }
+
+/* GPU Detail Cards */
+.gpu-detail-card { background: var(--bg); border: 1px solid var(--border2); border-radius: 6px; overflow: hidden; }
+.gpu-detail-head { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; background: rgba(13,17,23,0.25); }
+.gpu-detail-kicker { font-size: 9px; color: var(--text3); margin-right: 8px; }
+.gpu-detail-badge { font-size: 14px; font-weight: 700; }
+.gpu-detail-body { padding: 10px; }
+.gpu-detail-meters { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.gpu-detail-meter-head { display: flex; justify-content: space-between; font-size: 10px; margin-bottom: 2px; }
+.gpu-detail-track { height: 6px; background: var(--border2); border-radius: 3px; }
+.gpu-detail-track span { display: block; height: 100%; border-radius: 3px; transition: width 0.5s; }
+.gpu-detail-meta-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+.gpu-detail-meta-item { background: rgba(13,17,23,0.15); padding: 4px 6px; border-radius: 3px; }
+.gpu-detail-meta-item span { display: block; font-size: 8px; color: var(--text3); }
+.gpu-detail-meta-item b { display: block; font-size: 11px; margin-top: 1px; }
+
+/* Power buttons */
+.pwr-btn { padding: 4px 8px; border: 1px solid var(--border2); border-radius: 4px; background: var(--bg2); color: var(--text2); font-size: 9px; cursor: pointer; transition: 0.15s; font-family: inherit; }
+.pwr-btn:hover { background: var(--hover-bg); }
+.pwr-btn.active { background: rgba(88,166,255,0.15); border-color: var(--accent); color: var(--accent); }
+.pwr-btn-col { display: flex; gap: 4px; flex-wrap: wrap; padding: 4px 0; }
+
+/* KV Cache */
+.kv-cache-panel { padding: 8px; }
+.kv-panel-summary { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 6px; }
+.kv-summary-item { background: var(--bg); border: 1px solid var(--border2); border-radius: 4px; padding: 5px 8px; }
+.kv-summary-label { display: block; font-size: 9px; color: var(--text3); margin-bottom: 2px; }
+.kv-summary-value { font-size: 13px; font-weight: 700; color: var(--text); }
+.kv-remaining { color: var(--green) !important; }
+.kv-tokens { color: var(--accent) !important; }
+.kv-card-item { background: var(--bg); border: 1px solid var(--border2); border-radius: 5px; padding: 8px; position: relative; }
+.kv-card-name { font-size: 10px; font-weight: 600; display: block; margin-bottom: 4px; }
+.kv-card-row { display: flex; justify-content: space-between; font-size: 10px; padding: 2px 0; }
+.kv-card-label { color: var(--text3); }
+.kv-card-value { color: var(--text); font-weight: 500; }
+.kv-card-pct { position: absolute; top: 8px; right: 8px; font-size: 14px; font-weight: 700; color: var(--green); }
+.kv-cards-row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px; }
+
+/* Temp-Power Layout */
+.temp-pwr-layout { display: flex; gap: 12px; align-items: flex-start; }
+.temp-pwr-chart-area { flex: 1; }
+.temp-pwr-btns-area { flex: 0 0 auto; min-width: 160px; }
+
+/* Network Layout */
+.net-layout { display: grid; grid-template-columns: 1fr 200px; gap: 10px; }
+
+/* IP Stats Table */
+.ip-stats-table { width: 100%; border-collapse: collapse; font-size: 10px; }
+.ip-stats-table th { text-align: left; padding: 4px 6px; color: var(--text3); font-weight: 500; border-bottom: 1px solid var(--border2); font-size: 9px; }
+.ip-stats-table td { padding: 4px 6px; color: var(--text2); border-bottom: 1px solid var(--border2); }
+.ip-addr { font-family: monospace; color: var(--text) !important; }
+.token-num { font-family: 'Courier New', monospace; text-align: right; }
+.token-prompt { color: var(--accent); }
+.token-eval { color: var(--green); }
+.token-total { color: var(--text); font-weight: 600; }
+
+/* TPS Detail */
+.tps-detail { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border2); }
+.tps-row { display: flex; justify-content: space-between; font-size: 9px; padding: 1px 0; }
+.tps-label { color: var(--text3); }
+.tps-val { color: var(--text2); font-family: monospace; }
+
+/* KV Breakdown */
+.kv-breakdown-section { margin-top: 8px; border: 1px solid var(--border2); border-radius: 5px; }
+.kv-breakdown-header { display: flex; justify-content: space-between; padding: 6px 10px; font-size: 11px; font-weight: 600; cursor: pointer; background: rgba(13,17,23,0.15); }
+.kv-breakdown-detail { padding: 8px; }
+.kv-breakdown-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.kv-breakdown-card { background: var(--bg); border: 1px solid var(--border2); border-radius: 5px; padding: 8px; }
+.kv-breakdown-card-header { font-size: 10px; font-weight: 600; margin-bottom: 4px; }
+.kv-breakdown-row { display: flex; justify-content: space-between; font-size: 9px; padding: 2px 0; }
+.kv-breakdown-label { color: var(--text3); }
+.kv-breakdown-val { color: var(--text); }
+.kv-breakdown-total { border-top: 1px solid var(--border2); padding-top: 3px; margin-top: 3px; }
+.kv-breakdown-bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; margin-top: 6px; }
+.kv-bar-model { background: #58a6ff; }
+.kv-bar-kv { background: #3fb950; }
+.kv-bar-sys { background: #8b949e; }

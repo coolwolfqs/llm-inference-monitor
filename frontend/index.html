@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM Inference Monitor</title>
+<link rel="stylesheet" href="/static/css/base.css">
+<link rel="stylesheet" href="/static/css/layout.css">
+<link rel="stylesheet" href="/static/css/components.css">
+<link rel="stylesheet" href="/static/css/monitor.css">
+<link rel="stylesheet" href="/static/css/models.css">
+<link rel="stylesheet" href="/static/css/optimize.css">
+<script defer src="/static/js/utils.js"></script>
+<script defer src="/static/shared/ui-components.js"></script>
+<script defer src="/static/js/charts.js"></script>
+<script defer src="/static/js/system.js"></script>
+<script defer src="/static/js/inference.js"></script>
+<script defer src="/static/js/gpu.js"></script>
+<script defer src="/static/js/models.js"></script>
+<script defer src="/static/js/monitor.js"></script>
+</head>
+<body>
+
+<div class="header">
+    <h1>LLM Inference Monitor</h1>
+    <div class="info">
+        <span id="health-score-header" style="margin-right:8px;color:var(--green);" title="System Health Score">&#9679;</span>
+        <span id="uptime-display">Loading...</span>
+        <span id="conn-status" class="conn-status connected"><span class="conn-dot on"></span> Live</span>
+        <span id="clock">00:00:00</span>
+        <span><span class="dot"></span> Online</span>
+        <div class="actions">
+            <button class="persist-btn" id="persist-toggle" onclick="togglePersist()" title="Inference persist mode">
+                <span class="p-dot" id="p-dot"></span>
+                <span id="p-label">Auto</span>
+            </button>
+            <button class="act-btn" id="theme-toggle" onclick="toggleTheme()" title="Toggle theme">&#127769; Night</button>
+            <div class="sys-dropdown">
+                <button class="act-btn" id="sys-menu-btn" onclick="toggleSysMenu()" title="System management">&#9881;&#65039; Admin</button>
+                <div class="sys-menu" id="sys-menu">
+                    <button class="sys-menu-item warn" onclick="rebootSystem()">
+                        <span>&#128257;</span> <span>Reboot System</span>
+                    </button>
+                    <button class="sys-menu-item danger" onclick="shutdownSystem()">
+                        <span>&#9203;</span> <span>Shutdown</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="quick-nav" id="quick-nav">
+    <a href="http://INFERENCE_HOST:INFERENCE_PORT/" target="_blank" class="nav-item"><span class="nav-dot"></span>Inference Service <span class="nav-url">:INFERENCE_PORT</span></a>
+    <a href="http://NEW_API_HOST:NEW_API_PORT/" target="_blank" class="nav-item"><span class="nav-dot"></span>New API <span class="nav-url">:NEW_API_PORT</span></a>
+    <a href="/" target="_blank" class="nav-item active"><span class="nav-dot"></span>Monitor <span class="nav-url">:MONITOR_PORT</span></a>
+    <a href="/model-manager/" class="nav-item" target="_blank"><span class="nav-dot"></span>Model Manager <span class="nav-url">:MODEL_MANAGER_PORT</span></a>
+    <a href="/cluster/" class="nav-item" target="_blank"><span class="nav-dot" style="background:#a78bfa"></span>Cluster Config <span class="nav-url">:CLUSTER_PORT</span></a>
+    <a href="/benchmark/" class="nav-item" target="_blank"><span class="nav-dot"></span>LLM Benchmark <span class="nav-url">:BENCHMARK_PORT</span></a>
+    <a href="http://SEARXNG_HOST:SEARXNG_PORT/" target="_blank" class="nav-item"><span class="nav-dot" style="background:#3fb950"></span>SearXNG <span class="nav-url">:SEARXNG_PORT</span></a>
+    <a href="https://dash.cloudflare.com/" target="_blank" class="nav-item"><span class="nav-dot" style="background:#f38020"></span>Cloudflare <span class="nav-url">cf.com</span></a>
+</div>
+
+<div class="content">
+
+<!-- ======== SERVICE STATUS SECTION ======== -->
+<div class="section service-overview-ready" id="sec-services">
+    <div class="section-header">
+        <span class="sec-icon">&#128736;</span> Service Status
+        <span class="sec-right" id="svc-count">Loading...</span>
+    </div>
+    <div class="section-body" style="padding:0">
+        <div class="service-layout">
+            <div class="svc-hidden-model-info" style="display:none">
+                <div id="model-banner"></div>
+                <div class="model-info-toggle" id="model-info-toggle" onclick="toggleModelInfoPanel()" style="display:none;">
+                    <span id="model-info-toggle-text">&#9660; Expand Details</span>
+                </div>
+                <div id="model-info-panel" style="display:none;">
+                    <div id="model-info-panel-content"></div>
+                </div>
+            </div>
+            <div class="svc-overview-grid">
+                <!-- Model Loading -->
+                <div class="svc-overview-block svc-load-block">
+                    <div class="svc-overview-head">
+                        <div><span>Model Loading</span><small>Status / Parameters / Engine</small></div>
+                    </div>
+                    <div class="svc-overview-body">
+                        <div id="svc-load-summary" class="svc-load-summary">
+                            <div class="svc-empty">Waiting for data...</div>
+                        </div>
+                        <div id="svc-param-groups" class="svc-param-groups">
+                            <div class="svc-empty">Waiting for parameters...</div>
+                        </div>
+                        <div class="section" id="sec-engine-switch" style="margin-top:16px">
+                            <div class="section-header">
+                                <span class="sec-icon">&#128295;</span> Engine Switch
+                                <span class="sec-right" id="engine-count">Loading...</span>
+                            </div>
+                            <div class="section-body" style="padding:0">
+                                <div id="engine-cards" style="display:flex;flex-wrap:wrap;gap:12px;padding:12px;"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- GPU & System Hardware -->
+                <div class="svc-overview-block svc-hardware-block">
+                    <div class="svc-overview-head">
+                        <div><span>GPU & System Hardware</span><small>GPU / CPU / Memory / Load</small></div>
+                    </div>
+                    <div class="svc-overview-body">
+                        <div class="health-grid" id="health-grid">
+                            <div class="health-card" id="health-hardware">
+                                <div class="health-card-head"><span>Hardware</span><b id="health-hardware-score">--</b></div>
+                                <div class="health-meter"><span id="health-hardware-bar"></span></div>
+                                <div class="health-card-detail" id="health-hardware-detail">Checking...</div>
+                            </div>
+                            <div class="health-card" id="health-system">
+                                <div class="health-card-head"><span>System</span><b id="health-system-score">--</b></div>
+                                <div class="health-meter"><span id="health-system-bar"></span></div>
+                                <div class="health-card-detail" id="health-system-detail">Checking...</div>
+                            </div>
+                            <div class="health-card" id="health-inference">
+                                <div class="health-card-head"><span>Inference</span><b id="health-inference-score">--</b></div>
+                                <div class="health-meter"><span id="health-inference-bar"></span></div>
+                                <div class="health-card-detail" id="health-inference-detail">Checking...</div>
+                            </div>
+                        </div>
+                        <div class="health-reasons" id="health-reasons"></div>
+
+                        <!-- GPU Card -->
+                        <div class="gpu-card">
+                            <div class="gpu-name-row"><div class="gpu-chip"></div><span class="gpu-name-text" id="gpu-card-name">--</span></div>
+                            <div class="gpu-bar-row"><div class="gpu-bar-label"><span class="gl">Util</span><span class="gv" id="gpu-util">0%</span></div><div class="gpu-bar"><div class="gpu-bar-fill cyan" id="gpu-util-bar" style="width:0%"></div></div></div>
+                            <div class="gpu-bar-row"><div class="gpu-bar-label"><span class="gl">VRAM</span><span class="gv" id="gpu-mem">0/0 GB</span></div><div class="gpu-bar"><div class="gpu-bar-fill blue" id="gpu-mem-bar" style="width:0%"></div></div></div>
+                            <div class="gpu-bar-row"><div class="gpu-bar-label"><span class="gl">Power</span><span class="gv" id="gpu-power">0/0 W</span></div><div class="gpu-bar"><div class="gpu-bar-fill green" id="gpu-power-bar" style="width:0%"></div></div></div>
+                            <div class="gpu-bar-row"><div class="gpu-bar-label"><span class="gl">Temp</span><span class="gv" id="gpu-temp">0&deg;C</span></div><div class="gpu-bar"><div class="gpu-bar-fill yellow" id="gpu-temp-bar" style="width:0%"></div></div></div>
+                            <div class="gpu-bar-row"><div class="gpu-bar-label"><span class="gl">Fan</span><span class="gv" id="gpu-fan">0%</span></div><div class="gpu-bar"><div class="gpu-bar-fill purple" id="gpu-fan-bar" style="width:0%"></div></div></div>
+                            <div class="gpu-bar-row"><div class="gpu-bar-label"><span class="gl">Clock</span><span class="gv" id="gpu-clock">0 MHz</span></div></div>
+                            <div class="gpu-procs" id="gpu-procs-inline" style="display:none"></div>
+                        </div>
+
+                        <!-- System Card -->
+                        <div class="sys-card">
+                            <div class="sys-grid">
+                                <div class="sys-cell"><div class="sl">CPU</div><div class="sv" id="sys-cpu" style="color:var(--green)">0<span class="su">%</span></div></div>
+                                <div class="sys-cell"><div class="sl">Memory</div><div class="sv" id="sys-mem" style="color:var(--accent)">0<span class="su">%</span></div></div>
+                                <div class="sys-cell"><div class="sl">CPU Temp</div><div class="sv" id="sys-cpu-temp" style="color:var(--yellow)">--<span class="su">&deg;C</span></div></div>
+                                <div class="sys-cell"><div class="sl">Disk Temp</div><div class="sv" id="sys-disk-temp" style="color:var(--yellow)">0<span class="su">&deg;C</span></div></div>
+                                <div class="sys-cell"><div class="sl">Load</div><div class="sv" id="sys-load" style="color:var(--purple)">--</div></div>
+                                <div class="sys-cell"><div class="sl">Swap</div><div class="sv" id="sys-swap" style="color:var(--red)">--<span class="su">%</span></div></div>
+                            </div>
+                            <div class="cpu-cores" id="cpu-cores"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Validation -->
+                <div class="svc-overview-block svc-validation-block">
+                    <div class="svc-overview-head">
+                        <div><span>Data Validation</span><small>Process / GPU / Metrics / KV Cross-Validation</small></div>
+                    </div>
+                    <div class="svc-overview-body">
+                        <div id="svc-validation-grid" class="svc-validation-grid">
+                            <div class="svc-empty">Waiting for data...</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Inference -->
+                <div class="svc-overview-block svc-inference-block">
+                    <div class="svc-overview-head">
+                        <div><span>Inference</span><small>KV / VRAM / LLM Performance</small></div>
+                    </div>
+                    <div class="svc-overview-body">
+
+<div class="inf-card" style="padding:0">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;font-size:11px;font-weight:600;background:rgba(13,17,23,0.22);border-bottom:1px solid rgba(139,148,158,0.12)">
+    <span>&#127760; <span class="status-dot idle" id="req-status-dot"></span> <span id="req-status-text">Idle</span></span>
+    <span style="color:var(--text3);font-weight:400">Live Requests</span>
+  </div>
+  <div style="padding:8px 10px">
+    <div id="req-terminal-body" style="font-size:9.5px;font-family:monospace">
+      <div class="terminal-idle">Waiting for requests...</div>
+    </div>
+  </div>
+</div>
+
+<div class="inf-card" style="padding:0">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;font-size:11px;font-weight:600;background:rgba(13,17,23,0.22);border-bottom:1px solid rgba(139,148,158,0.12)">
+    <span>&#128202; IP Token Stats (Top 5)</span>
+    <span style="color:var(--text3); font-weight:400" id="ip-stats-count">-</span>
+  </div>
+  <table class="ip-stats-table">
+    <thead><tr>
+        <th>IP Address</th>
+        <th>Requests</th>
+        <th>Input Tokens</th>
+        <th>Output Tokens</th>
+        <th>Total</th>
+    </tr></thead>
+    <tbody id="ip-stats-body">
+        <tr><td colspan="5" style="text-align:center; color:var(--text3)">No data</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="inf-card" style="padding:0">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;font-size:11px;font-weight:600;background:rgba(13,17,23,0.22);border-bottom:1px solid rgba(139,148,158,0.12)">
+    <span>&#129504; KV Cache VRAM</span>
+    <span><span class="kv-panel-badge" id="kv-cache-type" style="font-size:9px;background:rgba(88,166,255,0.1);color:#58a6ff;margin-left:4px;">--</span> <span class="kv-panel-badge" id="inf-kv-level">Waiting...</span></span>
+  </div>
+  <div class="kv-cache-panel" id="kv-cache-panel">
+    <div class="kv-panel-summary">
+        <div class="kv-summary-item"><span class="kv-summary-label">KV Cache</span><span class="kv-summary-value" id="inf-kv-total">--</span></div>
+        <div class="kv-summary-item"><span class="kv-summary-label">Remaining</span><span class="kv-summary-value kv-remaining" id="inf-kv-remaining">--</span></div>
+        <div class="kv-summary-item"><span class="kv-summary-label">Available Tokens</span><span class="kv-summary-value kv-tokens" id="inf-kv-tokens">~--</span></div>
+        <div class="kv-summary-item"><span class="kv-summary-label">Physical VRAM Free</span><span class="kv-summary-value" id="inf-kv-phys-free">--</span></div>
+        <div class="kv-summary-item"><span class="kv-summary-label">Token Usage</span><span class="kv-summary-value" id="kv-token-usage">--</span></div>
+        <div class="kv-summary-item"><span class="kv-summary-label">Context Capacity</span><span class="kv-summary-value" id="kv-ctx-used">--</span></div>
+        <div class="kv-summary-item"><span class="kv-summary-label">Calc Source</span><span class="kv-summary-value" id="kv-calc-source">--</span></div>
+        <div class="kv-summary-item"><span class="kv-summary-label">Verify Delta</span><span class="kv-summary-value" id="kv-verify-delta">--</span></div>
+    </div>
+    <div class="kv-cards-row">
+        <div class="kv-card-item" id="kv-card-0"><span class="kv-card-name" id="kv-card-0-name">--</span>
+            <div class="kv-card-row"><span class="kv-card-label">KV Cache</span><span class="kv-card-value" id="kv-card-0-val">--</span></div>
+            <div class="kv-card-row"><span class="kv-card-label">Remain/Avail</span><span class="kv-card-phys" id="kv-card-0-remain">--</span></div>
+            <div class="kv-card-row"><span class="kv-card-label">Physical Free</span><span class="kv-card-phys" id="kv-card-0-phys">--</span></div>
+            <span class="kv-card-pct" id="kv-card-0-pct">--%</span>
+        </div>
+        <div class="kv-card-item" id="kv-card-1"><span class="kv-card-name" id="kv-card-1-name">--</span>
+            <div class="kv-card-row"><span class="kv-card-label">KV Cache</span><span class="kv-card-value" id="kv-card-1-val">--</span></div>
+            <div class="kv-card-row"><span class="kv-card-label">Remain/Avail</span><span class="kv-card-phys" id="kv-card-1-remain">--</span></div>
+            <div class="kv-card-row"><span class="kv-card-label">Physical Free</span><span class="kv-card-phys" id="kv-card-1-phys">--</span></div>
+            <span class="kv-card-pct" id="kv-card-1-pct">--%</span>
+        </div>
+    </div>
+    <div class="kv-breakdown-section" id="kv-breakdown-section">
+        <div class="kv-breakdown-header toggleable" onclick="toggleKvBreakdown()">
+            <span>&#128202; VRAM Distribution (<span id="vram-total-header">Total</span>)</span>
+            <span class="kv-panel-toggle" id="kv-breakdown-arrow">&#9654;</span>
+        </div>
+        <div class="kv-breakdown-summary">
+            <div class="kv-summary-item"><span class="kv-summary-label">Model Weights</span><span class="kv-summary-value" id="inf-model-weight">--</span></div>
+            <div class="kv-summary-item"><span class="kv-summary-label">KV Cache</span><span class="kv-summary-value" id="inf-kv-total-breakdown">--</span></div>
+            <div class="kv-summary-item"><span class="kv-summary-label">System/Profile</span><span class="kv-summary-value" id="inf-system-overhead">--</span></div>
+        </div>
+    </div>
+  </div>
+</div>
+
+<div class="inf-card" style="padding:0">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;font-size:11px;font-weight:600;background:rgba(13,17,23,0.22);border-bottom:1px solid rgba(139,148,158,0.12)">
+    <span>&#128200; Inference Metrics</span>
+  </div>
+  <div style="padding:12px">
+    <div style="display:flex;gap:32px;align-items:stretch;margin-bottom:12px">
+      <div style="flex:3;position:relative;min-height:50px;text-align:center">
+        <canvas class="ecg-canvas" id="ecg-canvas" style="position:absolute;top:0;left:0;width:100%;height:55%;pointer-events:none;z-index:0"></canvas>
+        <div style="position:relative;z-index:1">
+          <div style="font-size:10px;color:var(--text3);margin-bottom:2px">Speed</div>
+          <div style="font-size:28px;font-weight:700;color:var(--green)" id="inf-tps">-</div>
+          <div style="font-size:10px;color:var(--text3)">tokens/s</div>
+        </div>
+        <div class="tps-detail">
+            <div class="tps-row"><span class="tps-label">Prompt Speed</span><span class="tps-val" id="inf-tps-prompt">-</span></div>
+            <div class="tps-row"><span class="tps-label">Prompt Tokens</span><span class="tps-val" id="inf-prompt-tokens">-</span></div>
+            <div class="tps-row"><span class="tps-label">Generated Tokens</span><span class="tps-val" id="inf-eval-tokens">-</span></div>
+            <div class="tps-row"><span class="tps-label">Prompt Time</span><span class="tps-val" id="inf-prompt-time">-</span></div>
+            <div class="tps-row"><span class="tps-label">Gen Time</span><span class="tps-val" id="inf-eval-time">-</span></div>
+        </div>
+      </div>
+      <div style="flex:1;padding-top:20px;text-align:center">
+        <div style="font-size:10px;color:var(--text3);margin-bottom:2px">Active Slots</div>
+        <div style="font-size:28px;font-weight:700" id="inf-slots">-</div>
+        <div style="font-size:10px;color:var(--text3);margin-top:2px">Concurrency</div>
+      </div>
+    </div>
+    <div style="border-top:1px solid var(--border);padding-top:10px">
+      <div class="llm-metrics-panel" id="llm-metrics-panel">
+        <div class="kv-panel-header"><span>&#128200; LLM Performance</span></div>
+        <div class="kv-panel-summary">
+            <div class="kv-summary-item"><span class="kv-summary-label">TTFT</span><span class="kv-summary-value" id="llm-ttft">--</span></div>
+            <div class="kv-summary-item"><span class="kv-summary-label">TPOT</span><span class="kv-summary-value" id="llm-tpot">--</span></div>
+            <div class="kv-summary-item"><span class="kv-summary-label">Total Prompt Tokens</span><span class="kv-summary-value" id="llm-prompt-total">--</span></div>
+            <div class="kv-summary-item"><span class="kv-summary-label">Total Eval Tokens</span><span class="kv-summary-value" id="llm-eval-total">--</span></div>
+        </div>
+        <div class="kv-panel-summary" style="margin-top:6px">
+            <div class="kv-summary-item"><span class="kv-summary-label">KV Hit Rate</span><span class="kv-summary-value" id="llm-kv-hit">--</span></div>
+            <div class="kv-summary-item"><span class="kv-summary-label">MTP Accept Rate</span><span class="kv-summary-value" id="llm-spec-accept">--</span></div>
+            <div class="kv-summary-item"><span class="kv-summary-label">MTP Draft Length</span><span class="kv-summary-value" id="llm-spec-draft">--</span></div>
+            <div class="kv-summary-item"><span class="kv-summary-label">MTP Speedup</span><span class="kv-summary-value" id="llm-spec-speedup">--</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ======== GPU SECTION ======== -->
+<div class="section" id="sec-gpu">
+    <div class="section-header">
+        <span class="sec-icon">&#127918;</span><span id="gpu-section-title">GPU</span>
+        <span class="sec-right" id="gpu-driver-header">Driver --</span>
+    </div>
+    <div class="section-body">
+        <div class="chart-row r2">
+            <div class="chart-card">
+                <div class="chart-title"><span>GPU Util</span><span><span class="big-num" id="gpu-util-val">0</span><span class="unit">%</span></span></div>
+                <canvas id="gpu-util-chart" class="chart-canvas tall" width="1176" height="200"></canvas>
+                <div class="chart-footer">
+                    <span>Clock <b id="gpu-freq">0 MHz</b></span>
+                    <span>Max <b id="gpu-freq-max">0 MHz</b></span>
+                </div>
+            </div>
+            <div class="chart-card">
+                <div class="chart-title"><span>GPU VRAM</span><span><span class="big-num" id="gpu-mem-val">0</span><span class="unit">%</span></span></div>
+                <canvas id="gpu-mem-chart" class="chart-canvas tall" width="1176" height="200"></canvas>
+                <div class="chart-footer">
+                    <span>Used <b id="gpu-mem-used">0 MB</b></span>
+                    <span>Total <b id="gpu-mem-total">0 MB</b></span>
+                    <span>Free <b id="gpu-mem-free">0 MB</b></span>
+                </div>
+            </div>
+        </div>
+        <div class="chart-row r3" style="margin-top:10px">
+            <div class="chart-card">
+                <div class="temp-pwr-layout">
+                    <div class="temp-pwr-chart-area">
+                        <div class="chart-title"><span>Temp-Power Correlation</span><span><span class="big-num" id="temp-pwr-temp-val">0</span><span class="unit" style="margin-right:12px">&deg;C</span><span class="big-num" id="temp-pwr-pwr-val">0</span><span class="unit">W</span></span></div>
+                        <canvas id="temp-pwr-chart" class="chart-canvas" width="900" height="120" style="height:120px"></canvas>
+                        <div class="chart-footer">
+                            <span><span class="dot" style="background:#f85149"></span>GPU Temp (&deg;C)</span>
+                            <span><span class="dot" style="background:#d2a8ff"></span>GPU Power (W)</span>
+                        </div>
+                    </div>
+                    <div class="temp-pwr-btns-area">
+                        <div class="pwr-btn-col" id="pwr-btns-container">
+                            <span id="gpu-pwr-tabs" class="pwr-tabs-row"></span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div id="gpu-cards-container" style="margin-top:10px;">
+            <div id="gpu-cards-grid" style="display:grid;gap:12px;"></div>
+        </div>
+        <div id="gpu-single-detail" style="display:none;">
+            <div class="sub-row r2" style="margin-top:10px">
+                <div class="info-panel">
+                    <h3>Details</h3>
+                    <div class="info-row"><span class="label">Model</span><span class="value" id="gpu-info-name">--</span></div>
+                    <div class="info-row"><span class="label">Memory Type</span><span class="value" id="gpu-info-memtype">--</span></div>
+                    <div class="info-row"><span class="label">Bus Width</span><span class="value" id="gpu-info-buswidth">--</span></div>
+                    <div class="info-row"><span class="label"><span id="gpu-core-label">CUDA Cores</span></span><span class="value" id="gpu-info-cuda">--</span></div>
+                    <div class="info-row"><span class="label">TDP</span><span class="value" id="gpu-info-tdp">N/A</span></div>
+                </div>
+                <div class="info-panel" style="padding:8px">
+                    <h3 style="margin-bottom:6px;display:flex;justify-content:space-between;align-items:center">GPU Processes <span style="font-size:9px;color:#484f58;text-transform:none;letter-spacing:0">nvtop</span></h3>
+                    <table id="gpu-procs-table" style="width:100%;border-collapse:collapse;font-size:10.5px;font-family:'Courier New',monospace">
+                        <thead><tr style="color:#8b949e;border-bottom:1px solid #21262d">
+                            <th style="text-align:left;padding:2px 6px;font-weight:500">PID</th>
+                            <th style="text-align:left;padding:2px 6px;font-weight:500">Name</th>
+                            <th style="text-align:center;padding:2px 6px;font-weight:500;min-width:55px">Type</th>
+                            <th style="text-align:right;padding:2px 6px;font-weight:500">VRAM</th>
+                        </tr></thead>
+                        <tbody id="gpu-procs"><tr><td colspan="4" class="empty-msg">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ======== CPU SECTION ======== -->
+<div class="section" id="sec-cpu">
+    <div class="section-header">
+        <span class="sec-icon">&#129504;</span> CPU
+        <span class="sec-right" id="cpu-cores-header">Loading...</span>
+    </div>
+    <div class="section-body">
+        <div class="chart-row r2">
+            <div class="chart-card">
+                <div class="chart-title"><span>CPU Util</span><span><span class="big-num" id="cpu-util-val" style="color: var(--green);">0</span><span class="unit">%</span></span></div>
+                <canvas id="cpu-util-chart" class="chart-canvas tall" width="1176" height="200"></canvas>
+                <div class="chart-footer">
+                    <span>Clock <b id="cpu-freq-now">0 MHz</b></span>
+                    <span>Max <b id="cpu-freq-max">0 MHz</b></span>
+                </div>
+            </div>
+            <div class="chart-card">
+                <div class="chart-title"><span>CPU Frequency</span><span><span class="big-num" id="cpu-freq-val" style="font-size:22px">0</span><span class="unit">MHz</span></span><span id="cpu-temp-badge" style="font-size:10px;padding:2px 6px;border-radius:3px;background:rgba(248,81,73,0.12);color:#f85149;margin-left:6px;">&#127777; --&deg;C</span></div>
+                <canvas id="cpu-freq-chart" class="chart-canvas tall" width="1176" height="200"></canvas>
+            </div>
+        </div>
+        <div class="chart-card" style="margin-top:10px">
+            <div class="chart-title"><span>Per-Core Utilization</span></div>
+            <div id="core-grid" class="core-grid c16" style="padding:8px"></div>
+        </div>
+        <div class="sub-row r2" style="margin-top:10px">
+            <div class="info-panel">
+                <h3>CPU Details</h3>
+                <div class="info-row"><span class="label">Cores / Threads</span><span class="value" id="cpu-info-cores">--</span></div>
+                <div class="info-row"><span class="label">Virtualization</span><span class="value" id="cpu-info-virt">--</span></div>
+                <div class="info-row"><span class="label">L2 Cache</span><span class="value" id="cpu-info-l2">--</span></div>
+                <div class="info-row"><span class="label">L3 Cache</span><span class="value" id="cpu-info-l3">--</span></div>
+                <div class="info-row"><span class="label">Temperature</span><span class="value" id="cpu-info-temp">--</span></div>
+                <div class="info-row"><span class="label">Load (1/5/15)</span><span class="value" id="cpu-info-load">--</span></div>
+            </div>
+            <div class="info-panel">
+                <h3>Process Stats</h3>
+                <div class="info-row"><span class="label">Processes</span><span class="value" id="cpu-proc-count">--</span></div>
+                <div class="info-row"><span class="label">Threads</span><span class="value" id="cpu-thread-count">--</span></div>
+                <div class="info-row"><span class="label">Handles</span><span class="value" id="cpu-handle-count">--</span></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ======== MEMORY SECTION ======== -->
+<div class="section" id="sec-memory">
+    <div class="section-header">
+        <span class="sec-icon">&#128190;</span> Memory
+        <span class="sec-right" id="mem-total-header">Total --</span>
+    </div>
+    <div class="section-body">
+        <div class="chart-row r2">
+            <div class="chart-card">
+                <div class="chart-title"><span>Memory Usage</span><span><span class="big-num" id="mem-util-val" style="color: var(--green);">0</span><span class="unit">%</span></span></div>
+                <canvas id="mem-util-chart" class="chart-canvas tall" width="1176" height="200"></canvas>
+                <div class="chart-footer">
+                    <span>Used <b id="mem-used">0 GB</b></span>
+                    <span>Free <b id="mem-free">0 GB</b></span>
+                </div>
+            </div>
+            <div class="chart-card">
+                <div class="chart-title"><span>Memory Used</span><span><span class="big-num" id="mem-used-val" style="font-size:22px">0</span><span class="unit">GB</span></span></div>
+                <canvas id="mem-used-chart" class="chart-canvas tall" width="1176" height="200"></canvas>
+            </div>
+        </div>
+        <div class="sub-row r2" style="margin-top:10px">
+            <div class="info-panel">
+                <h3>Memory Details</h3>
+                <div class="info-row"><span class="label">Total</span><span class="value" id="mem-info-total">--</span></div>
+                <div class="info-row"><span class="label">Used</span><span class="value" id="mem-info-used">--</span></div>
+                <div class="info-row"><span class="label">Available</span><span class="value" id="mem-info-free">--</span></div>
+                <div class="info-row"><span class="label">Cached</span><span class="value" id="mem-info-cached">--</span></div>
+                <div class="info-row"><span class="label">Buffers</span><span class="value" id="mem-info-buffers">--</span></div>
+            </div>
+            <div class="info-panel">
+                <h3>Cache &amp; Swap</h3>
+                <div class="info-row"><span class="label">System Cache</span><span class="value" id="mem-cached-val">--</span></div>
+                <div class="info-row"><span class="label">Swap Used</span><span class="value" id="mem-swap-used">--</span></div>
+                <div class="info-row"><span class="label">Swap Total</span><span class="value" id="mem-swap-total">--</span></div>
+                <div class="info-row"><span class="label">Swap Usage</span><span class="value" id="mem-swap-pct">--</span></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ======== DISK SECTION ======== -->
+<div class="section" id="sec-disk">
+    <div class="section-header">
+        <span class="sec-icon">&#128187;</span> Disk
+        <span class="sec-right" id="disk-temp-header">--</span>
+    </div>
+    <div class="section-body">
+        <div class="chart-row r2">
+            <div class="chart-card">
+                <div class="chart-title"><span>Activity</span><span><span class="big-num" id="disk-active-val" style="color: var(--green);">0</span><span class="unit">%</span></span></div>
+                <canvas id="disk-active-chart" class="chart-canvas tall" width="1176" height="200"></canvas>
+                <div class="chart-footer">
+                    <span>Read <b id="disk-read">0 B/s</b></span>
+                    <span>Write <b id="disk-write">0 B/s</b></span>
+                </div>
+            </div>
+            <div class="sub-row r2" style="margin:0">
+                <div class="chart-card">
+                    <div class="chart-title"><span>Read Speed</span><span><span class="big-num" id="disk-read-val" style="font-size:18px">0 B/s</span></span></div>
+                    <canvas id="disk-read-chart" class="chart-canvas" width="1176" height="171"></canvas>
+                </div>
+                <div class="chart-card">
+                    <div class="chart-title"><span>Write Speed</span><span><span class="big-num" id="disk-write-val" style="font-size:18px">0 B/s</span></span></div>
+                    <canvas id="disk-write-chart" class="chart-canvas" width="1176" height="171"></canvas>
+                </div>
+            </div>
+        </div>
+        <div class="sub-row r2" style="margin-top:10px">
+            <div class="info-panel">
+                <h3>Disk Info</h3>
+                <div class="info-row"><span class="label">Model</span><span class="value" id="disk-info-model">--</span></div>
+                <div class="info-row"><span class="label">Type</span><span class="value" id="disk-info-type">--</span></div>
+                <div class="info-row"><span class="label">Capacity</span><span class="value" id="disk-info-size">--</span></div>
+                <div class="info-row"><span class="label">Temperature</span><span class="value" id="disk-info-temp">--</span></div>
+            </div>
+            <div class="info-panel">
+                <h3>Partitions</h3>
+                <div id="disk-partitions"><div class="empty-msg">Loading...</div></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ======== NETWORK SECTION ======== -->
+<div class="section" id="sec-network">
+    <div class="section-header">
+        <span class="sec-icon">&#127760;</span> Network
+        <span class="sec-right" id="net-adapter-name">eth0</span>
+    </div>
+    <div class="section-body">
+        <div class="net-layout">
+            <div class="net-main">
+                <div class="chart-card">
+                    <div class="chart-title"><span>Throughput</span></div>
+                    <canvas id="net-chart" class="chart-canvas tall" width="1176" height="200"></canvas>
+                    <div class="chart-footer">
+                        <span><span class="dot" style="background:#3fb950"></span>Rx <b id="net-recv">0 B/s</b></span>
+                        <span><span class="dot" style="background:#58a6ff"></span>Tx <b id="net-sent">0 B/s</b></span>
+                    </div>
+                </div>
+            </div>
+            <div class="net-side">
+                <div class="info-panel">
+                    <h3>Adapter Info</h3>
+                    <div class="info-row"><span class="label">Adapter</span><span class="value" id="net-adapter-detail">--</span></div>
+                    <div class="info-row"><span class="label">Link Speed</span><span class="value" id="net-speed">--</span></div>
+                    <div class="info-row"><span class="label">IPv4</span><span class="value" id="net-ipv4">--</span></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+</div>
+
+<script>
+function showToast(msg, type) {
+    if (window.SharedUI) SharedUI.toast(msg, type || 'info');
+    else console.log('[toast]', msg);
+}
+document.addEventListener('DOMContentLoaded', function() {
+    setTimeout(renderEngines, 1500);
+});
+</script>
+
+</body>
+</html>
