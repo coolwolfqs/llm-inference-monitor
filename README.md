@@ -1,4 +1,5 @@
 # LLM Inference Monitor (推理服务监控面板)
+<img width="1536" height="1024" alt="ChatGPT Image 2026年6月22日 10_36_41" src="https://github.com/user-attachments/assets/47421c75-a64b-465b-9348-c00f60171721" />
 
 一体化实时推理服务监控仪表盘，支持 GPU、CPU、内存、磁盘、网络指标采集和推理性能可视化。
 
