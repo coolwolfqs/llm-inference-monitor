@@ -1,0 +1,23 @@
+# InferenceHub v3 - Collector Configuration
+collectors:
+  gpu:
+    enabled: true
+    interval_sec: 5
+    vendor: "auto"  # auto | nvidia | amd
+  system:
+    enabled: true
+    interval_sec: 5
+  inference:
+    enabled: true
+    interval_sec: 2
+    log_path: "/tmp/llama-server.log"
+    max_log_entries: 20
+  llm_monitor:
+    enabled: true
+    interval_sec: 2
+    history_size: 300
+  kv_engine:
+    enabled: true
+    interval_sec: 5
+    baseline_auto_capture: true
+    baseline_capture_interval_min: 30

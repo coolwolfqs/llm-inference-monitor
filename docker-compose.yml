@@ -1,0 +1,41 @@
+version: "3.8"
+
+services:
+  victoria-metrics:
+    image: victoriametrics/victoria-metrics:latest
+    container_name: inference-hub-vm
+    ports:
+      - "8428:8428"
+    volumes:
+      - vm-data:/victoria-metrics-data
+    command:
+      - "--storageDataPath=/victoria-metrics-data"
+      - "--retentionPeriod=30d"
+      - "--httpListenAddr=:8428"
+    restart: unless-stopped
+
+  inference-hub:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: inference-hub-v3
+    ports:
+      - "9092:9092"
+    volumes:
+      - ./configs:/app/configs:ro
+      - /tmp/llama-server.log:/tmp/llama-server.log:ro
+    environment:
+      - LLAMA_API_KEY=${LLAMA_API_KEY}
+      - FEISHU_WEBHOOK_URL=${FEISHU_WEBHOOK_URL}
+      - WECHAT_WEBHOOK_URL=${WECHAT_WEBHOOK_URL}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - TZ=Asia/Shanghai
+    depends_on:
+      - victoria-metrics
+    restart: unless-stopped
+    network_mode: host
+
+volumes:
+  vm-data:
+    driver: local

@@ -1,0 +1,34 @@
+# InferenceHub v3 - Services Configuration
+services:
+  llama_server:
+    url: "http://127.0.0.1:9093"
+    api_key_env: "LLAMA_API_KEY"
+    timeout_sec: 10
+    health_path: "/health"
+    metrics_path: "/metrics"
+    stats_path: "/stats"
+    slots_path: "/slots"
+  model_manager:
+    url: "http://127.0.0.1:8093"
+    timeout_sec: 30
+  new_api:
+    url: "http://127.0.0.1:3010"
+    timeout_sec: 15
+    health_path: "/api/status"
+    docker_name: "new-api"
+  benchmark:
+    url: "http://127.0.0.1:8090"
+    timeout_sec: 30
+  cluster_config:
+    url: "http://127.0.0.1:8082"
+    timeout_sec: 10
+  victoria_metrics:
+    url: "http://127.0.0.1:8428"
+    write_path: "/api/v1/import"
+    query_path: "/api/v1/query"
+    query_range_path: "/api/v1/query_range"
+    timeout_sec: 5
+  dashboard:
+    listen: "0.0.0.0"
+    port: 9092
+    mode: "release"

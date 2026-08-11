@@ -1,0 +1,64 @@
+# InferenceHub v3 - Alert Rules
+alerts:
+  gpu_temp_critical:
+    enabled: true
+    metric: "gpu_temp_celsius"
+    condition: "gt"
+    threshold: 85
+    duration_sec: 30
+    severity: "critical"
+    message: "GPU温度过高: {{value}}°C"
+    channels: ["feishu", "wechat"]
+  gpu_mem_warning:
+    enabled: true
+    metric: "gpu_mem_used_pct"
+    condition: "gt"
+    threshold: 95
+    duration_sec: 10
+    severity: "critical"
+    message: "GPU显存即将耗尽: {{value}}%"
+    channels: ["feishu", "wechat"]
+  inference_latency_warning:
+    enabled: false
+    metric: "llm_ttft_ms_p99"
+    condition: "gt"
+    threshold: 5000
+    duration_sec: 60
+    severity: "warning"
+    message: "TTFT 暂无真实请求级采集，规则已停用"
+    channels: ["feishu"]
+  kv_cache_warning:
+    enabled: true
+    metric: "kv_cache_used_pct"
+    condition: "gt"
+    threshold: 98
+    duration_sec: 10
+    severity: "warning"
+    message: "KV缓存满载: {{value}}%"
+    channels: ["feishu"]
+  service_down:
+    enabled: true
+    metric: "service_health_status"
+    condition: "eq"
+    threshold: 0
+    duration_sec: 15
+    severity: "critical"
+    message: "推理服务宕机"
+    channels: ["feishu", "wechat", "telegram"]
+  disk_space_warning:
+    enabled: true
+    metric: "disk_free_pct"
+    condition: "lt"
+    threshold: 10
+    duration_sec: 60
+    severity: "warning"
+    message: "磁盘空间不足: {{value}}%"
+    channels: ["feishu"]
+notifiers:
+  feishu:
+    webhook_url_env: "FEISHU_WEBHOOK_URL"
+  wechat:
+    webhook_url_env: "WECHAT_WEBHOOK_URL"
+  telegram:
+    bot_token_env: "TELEGRAM_BOT_TOKEN"
+    chat_id_env: "TELEGRAM_CHAT_ID"
