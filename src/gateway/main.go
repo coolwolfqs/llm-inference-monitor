@@ -57,6 +57,17 @@ var globalNewAPIParser *shared.NewAPIParser
 // the collectors/VictoriaMetrics and is not coupled to this stream.
 var v2EventCursor uint64
 
+// A V2 section build touches service health endpoints, the process table,
+// engine metadata and request logs. Page refreshes and SSE clients must share
+// that work instead of multiplying it by the number of connected consumers.
+var v2SectionsCache = struct {
+	sync.Mutex
+	data gin.H
+	at   time.Time
+}{}
+
+const v2SectionsCacheTTL = time.Second
+
 func main() {
 	shared.Infof("InferenceHub v3 starting...")
 	globalNewAPIParser = shared.NewNewAPIParser()
@@ -3674,6 +3685,21 @@ func buildV2Sections(cfg *shared.Config, httpClient *shared.HTTPClient) gin.H {
 	return sections
 }
 
+func getV2Sections(now time.Time, build func() gin.H) gin.H {
+	v2SectionsCache.Lock()
+	defer v2SectionsCache.Unlock()
+	if v2SectionsCache.data != nil && now.Sub(v2SectionsCache.at) < v2SectionsCacheTTL {
+		return v2SectionsCache.data
+	}
+	v2SectionsCache.data = build()
+	v2SectionsCache.at = now
+	return v2SectionsCache.data
+}
+
+func cachedV2Sections(cfg *shared.Config, httpClient *shared.HTTPClient) gin.H {
+	return getV2Sections(time.Now(), func() gin.H { return buildV2Sections(cfg, httpClient) })
+}
+
 func handleV2Snapshot(cfg *shared.Config, httpClient *shared.HTTPClient) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		now := time.Now()
@@ -3682,7 +3708,7 @@ func handleV2Snapshot(cfg *shared.Config, httpClient *shared.HTTPClient) gin.Han
 			"snapshot_id":    now.UnixMilli(),
 			"collected_at":   now.Unix(),
 			"event_cursor":   atomic.LoadUint64(&v2EventCursor),
-			"sections":       buildV2Sections(cfg, httpClient),
+			"sections":       cachedV2Sections(cfg, httpClient),
 			"freshness":      collectorFreshness(),
 			"quality":        gin.H{"system": gin.H{"available": true}, "gpus": gin.H{"available": true}, "inference": gin.H{"available": true}},
 			"history":        getHistory(cfg),
@@ -3709,7 +3735,7 @@ func handleV2Events(cfg *shared.Config, httpClient *shared.HTTPClient) gin.Handl
 				now := time.Now()
 				event := gin.H{
 					"id": id, "type": "metrics.fast", "schema_version": "2.0",
-					"collected_at": now.Unix(), "data": gin.H{"sections": buildV2Sections(cfg, httpClient)},
+					"collected_at": now.Unix(), "data": gin.H{"sections": cachedV2Sections(cfg, httpClient)},
 				}
 				c.SSEvent("metrics.fast", event)
 				c.Writer.Flush()
