@@ -118,6 +118,13 @@ func ParseLlamaLogsEx(logPath string, maxEntries int, logFileModTime int64) ([]L
 	ipMap := make(map[string]*IPStat)
 	sourceMap := make(map[string]int)
 	totalRequests := 0
+	anchorLogTime := ""
+	for i := len(allLines) - 1; i >= 0; i-- {
+		if match := logTimeRe.FindStringSubmatch(allLines[i]); len(match) >= 2 {
+			anchorLogTime = match[1]
+			break
+		}
+	}
 
 	count := 0
 	for i := len(allLines) - 1; i >= 0 && count < maxEntries; i-- {
@@ -160,8 +167,12 @@ func ParseLlamaLogsEx(logPath string, maxEntries int, logFileModTime int64) ([]L
 
 		tm := logTimeRe.FindStringSubmatch(line)
 		logTimeStr := ""
+		eventTimestamp := time.Now().Unix() - int64(len(allLines)-i)*2
 		if len(tm) >= 2 {
-			logTimeStr = formatLogTime(tm[1], logFileModTime)
+			if wallTime, ok := logWallTime(tm[1], anchorLogTime, logFileModTime); ok {
+				eventTimestamp = wallTime.Unix()
+				logTimeStr = wallTime.Local().Format("15:04:05")
+			}
 		}
 
 		// 格式化时间毫秒
@@ -190,7 +201,7 @@ func ParseLlamaLogsEx(logPath string, maxEntries int, logFileModTime int64) ([]L
 		}
 
 		entry := LogEntry{
-			Timestamp:    time.Now().Unix() - int64(len(allLines)-i)*2,
+			Timestamp:    eventTimestamp,
 			Time:         logTimeStr,
 			Type:         "req",
 			Path:         "/v1/chat/completions",
@@ -234,26 +245,47 @@ func ParseLlamaLogsEx(logPath string, maxEntries int, logFileModTime int64) ([]L
 	return entries, ipStats, RequestSource{Sources: sourceMap, Total: totalRequests}
 }
 
-func formatLogTime(ts string, logFileModTime int64) string {
-	// llama-server时间戳格式: "1014.08.518.689" = 服务器启动秒数
-	// 通过日志文件修改时间近似计算墙钟时间
+func parseLogMonotonic(ts string) (float64, bool) {
+	// llama-server timestamps use minutes.seconds.milliseconds.microseconds,
+	// for example 1083.11.912.794 means 1083m 11.912794s since startup.
 	parts := strings.Split(ts, ".")
-	if len(parts) < 1 {
-		return ts
+	if len(parts) < 2 {
+		return 0, false
 	}
-	sec, err := strconv.ParseFloat(parts[0], 64)
+	minutes, err := strconv.ParseFloat(parts[0], 64)
 	if err != nil {
-		return ts
+		return 0, false
 	}
-	// 计算：日志文件修改时间 - (最后时间戳 - 当前时间戳)
-	// 简化：使用logFileModTime作为参考点，sec作为相对偏移
-	refTime := logFileModTime
-	if refTime == 0 {
-		return ts
+	seconds, err := strconv.ParseFloat(parts[1], 64)
+	if err != nil {
+		return 0, false
 	}
-	// 将时间戳秒数转换为参考点附近的时间
-	t := time.Unix(refTime-int64(sec), 0)
-	return t.Format("15:04:05")
+	fractionScale := 1.0
+	for _, fraction := range parts[2:] {
+		fractionScale *= 1000
+		value, parseErr := strconv.ParseFloat(fraction, 64)
+		if parseErr != nil {
+			return 0, false
+		}
+		seconds += value / fractionScale
+	}
+	return minutes*60 + seconds, true
+}
+
+func logWallTime(ts string, anchorTs string, logFileModTime int64) (time.Time, bool) {
+	if logFileModTime == 0 || anchorTs == "" {
+		return time.Time{}, false
+	}
+	current, ok := parseLogMonotonic(ts)
+	if !ok {
+		return time.Time{}, false
+	}
+	anchor, ok := parseLogMonotonic(anchorTs)
+	if !ok || current > anchor {
+		return time.Time{}, false
+	}
+	delta := time.Duration((anchor - current) * float64(time.Second))
+	return time.Unix(logFileModTime, 0).Add(-delta), true
 }
 func parseIntHint(s string) int {
 	v, _ := strconv.Atoi(s)

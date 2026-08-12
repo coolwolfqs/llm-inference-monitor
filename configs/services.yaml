@@ -11,6 +11,7 @@ services:
   model_manager:
     url: "http://127.0.0.1:8093"
     timeout_sec: 30
+    health_path: "/api/health"
   new_api:
     url: "http://127.0.0.1:3010"
     timeout_sec: 15
@@ -19,6 +20,7 @@ services:
   benchmark:
     url: "http://127.0.0.1:8090"
     timeout_sec: 30
+    health_path: "/api/health"
   cluster_config:
     url: "http://127.0.0.1:8082"
     timeout_sec: 10
