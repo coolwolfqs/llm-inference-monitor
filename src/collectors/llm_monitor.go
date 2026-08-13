@@ -40,7 +40,7 @@ func (c *LLMMonitor) Collect(ctx context.Context) (interface{}, error) {
 
 	result := shared.LLMMetrics{}
 
-	resp, err := c.http.Get(metricsURL)
+	resp, err := c.http.GetContext(ctx, metricsURL)
 	if err != nil {
 		c.write("llm_collect_error", 1.0, nil, time.Now())
 		return result, err

@@ -39,7 +39,7 @@ func (c *InferenceCollector) Collect(ctx context.Context) (interface{}, error) {
 	// Slots
 	slotsURL := baseURL + c.cfg.Services.LlamaServer.SlotsPath
 	var slotsData []map[string]interface{}
-	if err := c.http.GetJSON(slotsURL, &slotsData); err == nil {
+	if err := c.http.GetJSONContext(ctx, slotsURL, &slotsData); err == nil {
 		result.TotalSlots = len(slotsData)
 		for _, s := range slotsData {
 			slot := shared.SlotInfo{}
@@ -69,7 +69,7 @@ func (c *InferenceCollector) Collect(ctx context.Context) (interface{}, error) {
 	// Stats
 	statsURL := baseURL + c.cfg.Services.LlamaServer.StatsPath
 	var statsData map[string]interface{}
-	if err := c.http.GetJSON(statsURL, &statsData); err == nil {
+	if err := c.http.GetJSONContext(ctx, statsURL, &statsData); err == nil {
 		if v, ok := statsData["tokens_predicted_per_second"].(float64); ok {
 			result.LastTPS = v
 		}
@@ -92,7 +92,7 @@ func (c *InferenceCollector) Collect(ctx context.Context) (interface{}, error) {
 			result.KVCacheUsedCells = int(v)
 		}
 	} else {
-		c.parsePrometheusMetrics(baseURL, &result)
+		c.parsePrometheusMetrics(ctx, baseURL, &result)
 	}
 
 	// Write metrics
@@ -101,9 +101,9 @@ func (c *InferenceCollector) Collect(ctx context.Context) (interface{}, error) {
 	return result, nil
 }
 
-func (c *InferenceCollector) parsePrometheusMetrics(baseURL string, result *shared.InferenceMetrics) {
+func (c *InferenceCollector) parsePrometheusMetrics(ctx context.Context, baseURL string, result *shared.InferenceMetrics) {
 	metricsURL := baseURL + c.cfg.Services.LlamaServer.MetricsPath
-	resp, err := c.http.Get(metricsURL)
+	resp, err := c.http.GetContext(ctx, metricsURL)
 	if err != nil {
 		return
 	}

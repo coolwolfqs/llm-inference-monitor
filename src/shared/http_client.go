@@ -2,6 +2,7 @@ package shared
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -47,7 +48,17 @@ func (c *HTTPClient) getAPIKey() string {
 }
 
 func (c *HTTPClient) Get(url string) (*http.Response, error) {
-	req, err := http.NewRequest("GET", url, nil)
+	return c.GetContext(context.Background(), url)
+}
+
+// GetContext performs a GET request that is cancelled with ctx. Collectors
+// pass their cycle context here so a slow inference endpoint cannot outlive
+// the collector deadline and hold up the next cycle.
+func (c *HTTPClient) GetContext(ctx context.Context, url string) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +66,12 @@ func (c *HTTPClient) Get(url string) (*http.Response, error) {
 }
 
 func (c *HTTPClient) GetJSON(url string, result interface{}) error {
-	resp, err := c.Get(url)
+	return c.GetJSONContext(context.Background(), url, result)
+}
+
+// GetJSONContext is the context-aware JSON variant used by collectors.
+func (c *HTTPClient) GetJSONContext(ctx context.Context, url string, result interface{}) error {
+	resp, err := c.GetContext(ctx, url)
 	if err != nil {
 		return err
 	}

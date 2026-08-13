@@ -62,12 +62,13 @@ var v2EventCursor uint64
 // engine metadata and request logs. Page refreshes and SSE clients must share
 // that work instead of multiplying it by the number of connected consumers.
 var v2SectionsCache = struct {
-	sync.Mutex
-	data gin.H
-	at   time.Time
+	sync.RWMutex
+	data       gin.H
+	at         time.Time
+	refreshing bool
 }{}
 
-const v2SectionsCacheTTL = time.Second
+const v2SectionsCacheTTL = 2 * time.Second
 
 func main() {
 	shared.Infof("InferenceHub v3 starting...")
@@ -722,11 +723,12 @@ var (
 
 func cachedGPUData(cfg *shared.Config) *shared.GPUAggregate {
 	if globalGPUBase != nil {
-		if value, _, ok := globalGPUBase.Latest(15 * time.Second); ok {
+		if value, _, ok := globalGPUBase.LatestAny(); ok {
 			if gpus, typed := value.(shared.GPUAggregate); typed {
 				return &gpus
 			}
 		}
+		return nil
 	}
 	gpuCacheMu.RLock()
 	if gpuCacheData != nil && time.Since(gpuCacheTime) < gpuCacheTTL {
@@ -747,40 +749,43 @@ func cachedGPUData(cfg *shared.Config) *shared.GPUAggregate {
 
 func cachedSystemData() *shared.SystemMetrics {
 	if globalSystemBase != nil {
-		if value, _, ok := globalSystemBase.Latest(15 * time.Second); ok {
+		if value, _, ok := globalSystemBase.LatestAny(); ok {
 			if sys, typed := value.(shared.SystemMetrics); typed {
 				return &sys
 			}
 		}
+		return nil
 	}
 	return collectSystemData()
 }
 
 func cachedInferenceData(cfg *shared.Config, hc *shared.HTTPClient) *shared.InferenceMetrics {
 	if globalInferenceBase != nil {
-		if value, _, ok := globalInferenceBase.Latest(10 * time.Second); ok {
+		if value, _, ok := globalInferenceBase.LatestAny(); ok {
 			if inf, typed := value.(shared.InferenceMetrics); typed {
 				return &inf
 			}
 		}
+		return nil
 	}
-	return collectInferenceData(cfg, hc)
+	return nil
 }
 
 func cachedLLMData(cfg *shared.Config, hc *shared.HTTPClient) *shared.LLMMetrics {
 	if globalLLMBase != nil {
-		if value, _, ok := globalLLMBase.Latest(10 * time.Second); ok {
+		if value, _, ok := globalLLMBase.LatestAny(); ok {
 			if llm, typed := value.(shared.LLMMetrics); typed {
 				return &llm
 			}
 		}
+		return nil
 	}
-	return collectLLMData(cfg, hc)
+	return nil
 }
 
 func cachedKVData() *shared.KVMetrics {
 	if globalKVBase != nil {
-		if value, _, ok := globalKVBase.Latest(15 * time.Second); ok {
+		if value, _, ok := globalKVBase.LatestAny(); ok {
 			if kv, typed := value.(shared.KVMetrics); typed {
 				return &kv
 			}
@@ -3776,19 +3781,81 @@ func buildV2Sections(cfg *shared.Config, httpClient *shared.HTTPClient) gin.H {
 	return sections
 }
 
-func getV2Sections(now time.Time, build func() gin.H) gin.H {
-	v2SectionsCache.Lock()
-	defer v2SectionsCache.Unlock()
-	if v2SectionsCache.data != nil && now.Sub(v2SectionsCache.at) < v2SectionsCacheTTL {
-		return v2SectionsCache.data
+func emptyV2Sections() gin.H {
+	return gin.H{
+		"system": gin.H{"available": false},
+		"gpus":   gin.H{"items": []interface{}{}, "aggregate": nil},
+		"inference": gin.H{
+			"runtime":  nil,
+			"llm":      gin.H{"available": false, "sample_complete": false, "source": "collector warming"},
+			"kv_cache": nil,
+		},
+		"services":   gin.H{},
+		"deployment": gin.H{},
+		"requests": gin.H{
+			"sources":  gin.H{"sources": []interface{}{}, "total": 0},
+			"recent":   []interface{}{},
+			"ip_stats": []interface{}{},
+		},
 	}
-	v2SectionsCache.data = build()
-	v2SectionsCache.at = now
-	return v2SectionsCache.data
+}
+
+func refreshV2Sections(build func() gin.H) {
+	var data gin.H
+	func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				shared.Errorf("[v2 snapshot] background refresh panic: %v", recovered)
+			}
+		}()
+		data = build()
+	}()
+
+	v2SectionsCache.Lock()
+	if data != nil {
+		v2SectionsCache.data = data
+		// Record completion time, not request start time. Otherwise queued
+		// callers can all decide the result is already expired and rebuild it.
+		v2SectionsCache.at = time.Now()
+	}
+	v2SectionsCache.refreshing = false
+	v2SectionsCache.Unlock()
+}
+
+// getV2Sections never performs a slow collector call on the HTTP request
+// goroutine. It returns the last good snapshot (or a shaped empty snapshot)
+// and refreshes the cache in the background when the TTL expires.
+func getV2Sections(build func() gin.H) gin.H {
+	now := time.Now()
+	v2SectionsCache.RLock()
+	data := v2SectionsCache.data
+	at := v2SectionsCache.at
+	v2SectionsCache.RUnlock()
+	if data != nil && now.Sub(at) < v2SectionsCacheTTL {
+		return data
+	}
+
+	v2SectionsCache.Lock()
+	now = time.Now()
+	if v2SectionsCache.data != nil && now.Sub(v2SectionsCache.at) < v2SectionsCacheTTL {
+		data = v2SectionsCache.data
+		v2SectionsCache.Unlock()
+		return data
+	}
+	if !v2SectionsCache.refreshing {
+		v2SectionsCache.refreshing = true
+		go refreshV2Sections(build)
+	}
+	data = v2SectionsCache.data
+	v2SectionsCache.Unlock()
+	if data != nil {
+		return data
+	}
+	return emptyV2Sections()
 }
 
 func cachedV2Sections(cfg *shared.Config, httpClient *shared.HTTPClient) gin.H {
-	return getV2Sections(time.Now(), func() gin.H { return buildV2Sections(cfg, httpClient) })
+	return getV2Sections(func() gin.H { return buildV2Sections(cfg, httpClient) })
 }
 
 func handleV2Snapshot(cfg *shared.Config, httpClient *shared.HTTPClient) gin.HandlerFunc {
@@ -3817,19 +3884,28 @@ func handleV2Events(cfg *shared.Config, httpClient *shared.HTTPClient) gin.Handl
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 		ctx := c.Request.Context()
+		send := func() {
+			id := atomic.AddUint64(&v2EventCursor, 1)
+			now := time.Now()
+			event := gin.H{
+				"id": id, "type": "metrics.fast", "schema_version": "2.0",
+				"collected_at": now.Unix(), "data": gin.H{"sections": cachedV2Sections(cfg, httpClient)},
+			}
+			c.SSEvent("metrics.fast", event)
+			c.Writer.Flush()
+		}
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			send()
+		}
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				id := atomic.AddUint64(&v2EventCursor, 1)
-				now := time.Now()
-				event := gin.H{
-					"id": id, "type": "metrics.fast", "schema_version": "2.0",
-					"collected_at": now.Unix(), "data": gin.H{"sections": cachedV2Sections(cfg, httpClient)},
-				}
-				c.SSEvent("metrics.fast", event)
-				c.Writer.Flush()
+				send()
 			}
 		}
 	}

@@ -141,6 +141,18 @@ func (b *BaseCollector) Latest(maxAge time.Duration) (interface{}, time.Time, bo
 	return b.latest, b.latestAt, true
 }
 
+// LatestAny returns the most recent successful sample even when it is stale.
+// Presentation APIs should prefer a stale sample plus freshness metadata over
+// synchronously collecting from a busy inference service.
+func (b *BaseCollector) LatestAny() (interface{}, time.Time, bool) {
+	b.latestMu.RLock()
+	defer b.latestMu.RUnlock()
+	if b.latest == nil || b.latestAt.IsZero() {
+		return nil, b.latestAt, false
+	}
+	return b.latest, b.latestAt, true
+}
+
 // Stop gracefully stops the collector
 func (b *BaseCollector) Stop() {
 	close(b.stopCh)

@@ -14,7 +14,9 @@ collectors:
     max_log_entries: 20
   llm_monitor:
     enabled: true
-    interval_sec: 2
+    # Metrics scraping can be slower while multiple inference slots are busy.
+    # Keep it independent from the dashboard SSE cadence.
+    interval_sec: 5
     history_size: 300
   kv_engine:
     enabled: true
