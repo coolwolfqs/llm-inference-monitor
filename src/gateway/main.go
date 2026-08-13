@@ -460,7 +460,7 @@ func setupRouter(cfg *shared.Config, store *shared.MetricsStore, httpClient *sha
 		}
 	}
 
-	proxyRoutes(r, cfg)
+	proxyRoutes(r, cfg, authMW)
 	compatProxyRoutes(r, cfg, authMW)
 
 	r.NoRoute(func(c *gin.Context) {
@@ -473,7 +473,7 @@ func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Admin-Key")
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)
 			return
@@ -4007,7 +4007,16 @@ func parseLlamaParams() map[string]interface{} {
 
 // ===== Proxy Routes =====
 
-func proxyRoutes(r *gin.Engine, cfg *shared.Config) {
+func registerReadWriteProxy(r *gin.Engine, pattern string, auth gin.HandlerFunc, proxy gin.HandlerFunc) {
+	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodOptions} {
+		r.Handle(method, pattern, proxy)
+	}
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
+		r.Handle(method, pattern, auth, proxy)
+	}
+}
+
+func proxyRoutes(r *gin.Engine, cfg *shared.Config, auth gin.HandlerFunc) {
 	services := map[string]string{
 		"cluster":      cfg.Services.ClusterConfig.URL,
 		"benchmark":    cfg.Services.Benchmark.URL,
@@ -4015,7 +4024,7 @@ func proxyRoutes(r *gin.Engine, cfg *shared.Config) {
 	}
 
 	// Enhanced model-manager proxy with HTML base href injection
-	r.Any("/model-manager/*path", func(c *gin.Context) {
+	modelManagerProxy := func(c *gin.Context) {
 		targetURL := cfg.Services.ModelManager.URL
 		path := c.Param("path")
 		if path == "" {
@@ -4053,11 +4062,11 @@ func proxyRoutes(r *gin.Engine, cfg *shared.Config) {
 		}
 		c.Writer.WriteHeader(resp.StatusCode)
 		c.Writer.Write(body)
-	})
+	}
+	registerReadWriteProxy(r, "/model-manager/*path", auth, modelManagerProxy)
 
 	for prefix, target := range services {
-		// Only use catch-all route, no separate prefix route
-		r.Any(prefix+"/*path", createProxyHandler(target, prefix))
+		registerReadWriteProxy(r, prefix+"/*path", auth, createProxyHandler(target, prefix))
 	}
 }
 

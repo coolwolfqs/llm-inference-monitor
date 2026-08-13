@@ -1,0 +1,16 @@
+[Unit]
+Description=LLM API Speed Test
+After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=draco
+WorkingDirectory=/home/draco/llm-speedtest
+ExecStart=/usr/bin/python3 -m uvicorn app:app --host 127.0.0.1 --port 8090
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
