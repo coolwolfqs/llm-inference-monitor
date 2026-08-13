@@ -3166,6 +3166,32 @@ func handleKVBaselineRefresh() gin.HandlerFunc {
 
 // ===== Engines =====
 
+func engineRegistryKey(vj map[string]interface{}, fallback string) string {
+	for _, field := range []string{"key", "id", "backend"} {
+		if value, ok := vj[field].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return fallback
+}
+
+func engineBinaryPath(enginesDir, registryDir, key string, vj map[string]interface{}) string {
+	if value, ok := vj["binary_path"].(string); ok && strings.TrimSpace(value) != "" {
+		return strings.TrimSpace(value)
+	}
+	candidates := []string{
+		filepath.Join(enginesDir, "llama", "build-"+key, "bin", "llama-server"),
+		filepath.Join(registryDir, "build", "bin", "llama-server"),
+		filepath.Join(registryDir, "bin", "llama-server"),
+	}
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return ""
+}
+
 func handleGetEngines(cfg *shared.Config, httpClient *shared.HTTPClient) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		enginesDir := "/data/engines"
@@ -3187,16 +3213,14 @@ func handleGetEngines(cfg *shared.Config, httpClient *shared.HTTPClient) gin.Han
 				if json.Unmarshal(data, &vj) != nil {
 					continue
 				}
-				key, _ := vj["key"].(string)
-				if key == "" {
-					key = entry.Name()
-				}
+				key := engineRegistryKey(vj, entry.Name())
+				registryDir := filepath.Join(enginesDir, entry.Name())
 				eng := gin.H{
 					"key":            key,
 					"id":             key,
 					"name":           vj["name"],
 					"type":           engineType(key),
-					"binary_path":    vj["binary_path"],
+					"binary_path":    engineBinaryPath(enginesDir, registryDir, key, vj),
 					"version":        vj["version"],
 					"features":       vj["features"],
 					"version_params": vj["version_params"],
@@ -3256,7 +3280,37 @@ func handleSwitchEngine(cfg *shared.Config, httpClient *shared.HTTPClient) gin.H
 			c.JSON(400, gin.H{"error": "engine required"})
 			return
 		}
-		c.JSON(200, gin.H{"status": "switch_requested", "engine": engine})
+		var selected gin.H
+		for _, candidate := range scanEngines() {
+			if candidate["key"] == engine {
+				selected = candidate
+				break
+			}
+		}
+		binaryPath, _ := selected["binary_path"].(string)
+		if selected == nil || binaryPath == "" {
+			c.JSON(400, gin.H{"error": "engine unavailable", "engine": engine})
+			return
+		}
+
+		payload, _ := json.Marshal(gin.H{"llama_version": engine})
+		endpoint := strings.TrimRight(cfg.Services.ModelManager.URL, "/") + "/api/service/switch_version"
+		upstreamReq, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, endpoint, bytes.NewReader(payload))
+		if err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+		upstreamReq.Header.Set("Content-Type", "application/json")
+		if adminKey := os.Getenv("MODEL_MANAGER_ADMIN_KEY"); adminKey != "" {
+			upstreamReq.Header.Set("X-Admin-Key", adminKey)
+		}
+		resp, err := (&http.Client{Timeout: 45 * time.Second}).Do(upstreamReq)
+		if err != nil {
+			c.JSON(502, gin.H{"error": "model-manager switch failed", "detail": err.Error()})
+			return
+		}
+		defer resp.Body.Close()
+		c.DataFromReader(resp.StatusCode, resp.ContentLength, resp.Header.Get("Content-Type"), resp.Body, nil)
 	}
 }
 
@@ -3856,16 +3910,18 @@ func scanEngines() []gin.H {
 		if json.Unmarshal(data, &vj) != nil {
 			continue
 		}
-		key, _ := vj["key"].(string)
-		if key == "" {
-			key = entry.Name()
+		key := engineRegistryKey(vj, entry.Name())
+		name := vj["name"]
+		if name == nil || name == "" {
+			name = key
 		}
+		registryDir := filepath.Join(enginesDir, entry.Name())
 		engines = append(engines, gin.H{
-			"key": key, "name": vj["name"], "type": engineType(key),
+			"key": key, "name": name, "type": engineType(key),
 			"version": vj["version"], "features": vj["features"],
 			"branch": vj["branch"], "commit": vj["commit"],
 			"upstream_tag": vj["upstream_tag"], "github_url": vj["github_url"],
-			"binary_path": vj["binary_path"], "version_params": vj["version_params"],
+			"binary_path": engineBinaryPath(enginesDir, registryDir, key, vj), "version_params": vj["version_params"],
 		})
 	}
 	return engines
