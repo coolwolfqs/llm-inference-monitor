@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	stdnet "net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -112,9 +113,13 @@ func main() {
 	router := setupRouter(cfg, store, httpClient, globalKVEngine)
 
 	addr := cfg.DashboardAddr()
+	requestCtx, cancelRequests := context.WithCancel(context.Background())
+	defer cancelRequests()
+	baseContext := func(stdnet.Listener) context.Context { return requestCtx }
 	srv := &http.Server{
-		Addr:    addr,
-		Handler: router,
+		Addr:        addr,
+		Handler:     router,
+		BaseContext: baseContext,
 	}
 	var extraSrv *http.Server
 
@@ -126,7 +131,7 @@ func main() {
 		}
 	}()
 	if extraPort := strings.TrimSpace(os.Getenv("DASHBOARD_EXTRA_PORT")); extraPort != "" && extraPort != fmt.Sprint(cfg.Services.Dashboard.Port) {
-		extraSrv = &http.Server{Addr: cfg.Services.Dashboard.Listen + ":" + extraPort, Handler: router}
+		extraSrv = &http.Server{Addr: cfg.Services.Dashboard.Listen + ":" + extraPort, Handler: router, BaseContext: baseContext}
 		go func() {
 			shared.Infof("Dashboard compatibility listener on %s", extraSrv.Addr)
 			if err := extraSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -139,25 +144,47 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	shared.Infof("Shutting down server...")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	cancelRequests()
 
 	for _, c := range collectorList {
 		c.Stop()
 	}
 
-	if err := srv.Shutdown(ctx); err != nil {
-		shared.Errorf("Server forced to shutdown: %v", err)
-	}
+	servers := []*http.Server{srv}
 	if extraSrv != nil {
-		if err := extraSrv.Shutdown(ctx); err != nil {
-			shared.Errorf("Compatibility server forced to shutdown: %v", err)
-		}
+		servers = append(servers, extraSrv)
 	}
+	shutdownHTTPServers(servers, time.Second)
 
 	store.Flush()
 	shared.Infof("Server exited")
+}
+
+func shutdownHTTPServers(servers []*http.Server, grace time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), grace)
+	defer cancel()
+	var wg sync.WaitGroup
+	for _, server := range servers {
+		wg.Add(1)
+		go func(s *http.Server) {
+			defer wg.Done()
+			if err := s.Shutdown(ctx); err != nil && err != context.DeadlineExceeded {
+				shared.Errorf("HTTP server shutdown failed: %v", err)
+			}
+		}(server)
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+		return
+	case <-ctx.Done():
+		for _, server := range servers {
+			_ = server.Close()
+		}
+		<-done
+		shared.Infof("Closed remaining long-lived HTTP connections after %s grace period", grace)
+	}
 }
 
 // handleNodeIdentity is a read-only registration precursor. It deliberately
@@ -2813,7 +2840,11 @@ func handleProxyClusterNodes(cfg *shared.Config, httpClient *shared.HTTPClient) 
 		cURL := cfg.Services.ClusterConfig.URL
 		resp, err := httpClient.Get(cURL + "/api/nodes")
 		if err != nil {
-			c.JSON(500, gin.H{"error": err.Error()})
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error":         "cluster_service_unavailable",
+				"detail":        "集群配置服务尚未部署或未启动",
+				"service_ready": false,
+			})
 			return
 		}
 		defer resp.Body.Close()
@@ -3585,11 +3616,17 @@ func v2DeploymentSection() gin.H {
 
 func v2ServicesSection(cfg *shared.Config) gin.H {
 	status := buildServicesMap(cfg)
+	return v2ServicesFromStatus(status, cfg.Services.Dashboard.Port)
+}
+
+func v2ServicesFromStatus(status map[string]string, dashboardPort int) gin.H {
 	result := gin.H{}
 	result["推理服务"] = gin.H{"status": boolStr(status["llama-server"] == "healthy"), "detail": "", "port": "8080"}
 	result["模型管理"] = gin.H{"status": boolStr(status["model-manager"] == "healthy"), "detail": "", "port": "8093"}
+	result["LLM测速"] = gin.H{"status": boolStr(status["benchmark"] == "healthy"), "detail": "推理性能评估", "port": "8090"}
+	result["集群配置"] = gin.H{"status": boolStr(status["cluster-config"] == "healthy"), "detail": "节点与路由配置", "port": "8082"}
 	result["SearXNG"] = gin.H{"status": boolStr(status["searxng"] == "healthy"), "detail": "", "port": "8888"}
-	result["监控面板"] = gin.H{"status": "running", "detail": "Go migration bridge", "port": fmt.Sprint(cfg.Services.Dashboard.Port)}
+	result["监控面板"] = gin.H{"status": "running", "detail": "Go migration bridge", "port": fmt.Sprint(dashboardPort)}
 	return result
 }
 
