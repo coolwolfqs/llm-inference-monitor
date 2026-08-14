@@ -2523,6 +2523,21 @@ func handleGetPersist(cfg *shared.Config, httpClient *shared.HTTPClient) gin.Han
 	}
 }
 
+// postModelManagerJSON adds the internal control-plane credential when the
+// gateway mutates model-manager state. The browser-facing ADMIN_KEY is only
+// for the gateway boundary and must not be forwarded as the upstream key.
+func postModelManagerJSON(c *gin.Context, httpClient *shared.HTTPClient, endpoint string, body []byte) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if adminKey := strings.TrimSpace(os.Getenv("MODEL_MANAGER_ADMIN_KEY")); adminKey != "" {
+		req.Header.Set("X-Admin-Key", adminKey)
+	}
+	return httpClient.Do(req)
+}
+
 func handleSetPersist(cfg *shared.Config, httpClient *shared.HTTPClient) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		body, err := io.ReadAll(c.Request.Body)
@@ -2531,7 +2546,7 @@ func handleSetPersist(cfg *shared.Config, httpClient *shared.HTTPClient) gin.Han
 			return
 		}
 		mmURL := cfg.Services.ModelManager.URL
-		resp, err := httpClient.Post(mmURL+"/api/service/persist", bytes.NewReader(body))
+		resp, err := postModelManagerJSON(c, httpClient, mmURL+"/api/service/persist", body)
 		if err != nil {
 			c.JSON(500, gin.H{"error": err.Error()})
 			return
@@ -3400,7 +3415,7 @@ func handleSetLlamaParams(cfg *shared.Config, httpClient *shared.HTTPClient) gin
 
 		// 通过 model-manager 更新参数
 		mmURL := cfg.Services.ModelManager.URL
-		resp, err := httpClient.Post(mmURL+"/api/settings/params", bytes.NewReader(body))
+		resp, err := postModelManagerJSON(c, httpClient, mmURL+"/api/settings/params", body)
 		if err != nil {
 			// 如果 model-manager 不可用，直接返回
 			c.JSON(200, gin.H{"status": "params_updated", "note": "需要重启 llama-server 生效"})

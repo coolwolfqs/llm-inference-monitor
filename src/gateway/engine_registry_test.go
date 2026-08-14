@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"inference-hub-v3/src/middleware"
+	"inference-hub-v3/src/shared"
 )
 
 func TestUpdatedEngineMetadataResolvesRegistryKeyAndBinary(t *testing.T) {
@@ -91,5 +93,35 @@ func TestCORSAdvertisesAdminKeyHeader(t *testing.T) {
 	}
 	if headers := response.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(headers, "X-Admin-Key") {
 		t.Fatalf("admin key header missing from CORS response: %q", headers)
+	}
+}
+
+func TestModelManagerMutationForwardsInternalAdminKey(t *testing.T) {
+	t.Setenv("MODEL_MANAGER_ADMIN_KEY", "internal-control-key")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Admin-Key"); got != "internal-control-key" {
+			t.Errorf("upstream admin key = %q, want internal control key", got)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read upstream body: %v", err)
+		}
+		if string(body) != `{"mode":"auto"}` {
+			t.Errorf("upstream body = %q", body)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/settings/persist", strings.NewReader(`{"mode":"auto"}`))
+	resp, err := postModelManagerJSON(ctx, shared.NewHTTPClient(5, ""), upstream.URL, []byte(`{"mode":"auto"}`))
+	if err != nil {
+		t.Fatalf("post model-manager request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("upstream status = %d", resp.StatusCode)
 	}
 }
