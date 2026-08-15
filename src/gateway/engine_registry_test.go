@@ -41,6 +41,50 @@ func TestExplicitEngineBinaryPathRemainsAuthoritative(t *testing.T) {
 	}
 }
 
+func TestEngineCapabilityProbeAddsMTPMetadata(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "llama-server")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nprintf '%s\\n' '--spec-type none,draft-mtp'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	engine := gin.H{
+		"key":            "test",
+		"binary_path":    binary,
+		"features":       []interface{}{"muse-glimmer"},
+		"version_params": map[string]interface{}{},
+	}
+	enrichEngineCapabilities(engine)
+	if engine["supports_mtp"] != true {
+		t.Fatalf("supports_mtp = %v, want true", engine["supports_mtp"])
+	}
+	features, ok := engine["features"].([]interface{})
+	if !ok || len(features) != 2 || features[1] != "MTP" {
+		t.Fatalf("features = %#v, want existing feature plus MTP", engine["features"])
+	}
+	params, ok := engine["version_params"].(map[string]interface{})
+	if !ok || params["spec_draft_n_max"] != 3 {
+		t.Fatalf("version_params = %#v, want spec_draft_n_max=3", engine["version_params"])
+	}
+}
+
+func TestStaticAssetHeadersCacheHashedBundles(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(staticAssetHeaders())
+	router.GET("/assets/index-abc123.js", func(c *gin.Context) { c.Status(http.StatusOK) })
+	router.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	asset := httptest.NewRecorder()
+	router.ServeHTTP(asset, httptest.NewRequest(http.MethodGet, "/assets/index-abc123.js", nil))
+	if got := asset.Header().Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+		t.Fatalf("asset cache header = %q", got)
+	}
+	page := httptest.NewRecorder()
+	router.ServeHTTP(page, httptest.NewRequest(http.MethodGet, "/", nil))
+	if got := page.Header().Get("Cache-Control"); got != "no-cache" {
+		t.Fatalf("page cache header = %q", got)
+	}
+}
+
 func TestV2ServicesIncludesAllUserFacingBusinessLines(t *testing.T) {
 	services := v2ServicesFromStatus(map[string]string{
 		"llama-server": "healthy", "model-manager": "healthy", "benchmark": "healthy",

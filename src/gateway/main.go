@@ -70,6 +70,22 @@ var v2SectionsCache = struct {
 
 const v2SectionsCacheTTL = 2 * time.Second
 
+// Engine capability probing is intentionally cached. VERSION.json describes
+// how an engine was built, but older registries do not record parser features
+// such as draft-mtp. Running --help for every dashboard refresh would add
+// process churn and make the engine card slower than the rest of the snapshot.
+var engineCapabilityCache = struct {
+	sync.RWMutex
+	items map[string]engineCapability
+}{items: make(map[string]engineCapability)}
+
+type engineCapability struct {
+	supportsMTP bool
+	checkedAt   time.Time
+}
+
+const engineCapabilityTTL = 10 * time.Minute
+
 func main() {
 	shared.Infof("InferenceHub v3 starting...")
 	globalNewAPIParser = shared.NewNewAPIParser()
@@ -308,6 +324,7 @@ func setupRouter(cfg *shared.Config, store *shared.MetricsStore, httpClient *sha
 	r := gin.Default()
 
 	r.Use(corsMiddleware())
+	r.Use(staticAssetHeaders())
 
 	authMW := middleware.AuthMiddleware()
 
@@ -465,11 +482,43 @@ func setupRouter(cfg *shared.Config, store *shared.MetricsStore, httpClient *sha
 	compatProxyRoutes(r, cfg, authMW)
 
 	r.NoRoute(func(c *gin.Context) {
+		// Keep SPA history fallback for page routes, but never turn a typo in an
+		// API path into a successful HTML response. Clients can then distinguish
+		// a missing endpoint from a valid dashboard document.
+		path := c.Request.URL.Path
+		if path == "/api" || strings.HasPrefix(path, "/api/") || path == "/mm/api" || strings.HasPrefix(path, "/mm/api/") {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error":  "api_not_found",
+				"detail": "接口不存在",
+				"path":   path,
+				"status": http.StatusNotFound,
+			})
+			return
+		}
 		c.File("/data/dashboard/index.html")
 	})
 
 	return r
 }
+
+// staticAssetHeaders keeps hashed bundles cacheable while leaving HTML and API
+// responses revalidatable. The model-manager and benchmark assets are served
+// through the same gateway, so one policy covers all product workspaces.
+func staticAssetHeaders() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		path := c.Request.URL.Path
+		if strings.Contains(path, "/assets/") && strings.Contains(path, "-") &&
+			(strings.HasSuffix(path, ".js") || strings.HasSuffix(path, ".css") || strings.HasSuffix(path, ".map") || strings.HasSuffix(path, ".woff2")) {
+			c.Header("Cache-Control", "public, max-age=31536000, immutable")
+			c.Header("Vary", "Accept-Encoding")
+		}
+		if path == "/" || strings.HasSuffix(path, "/index.html") {
+			c.Header("Cache-Control", "no-cache")
+		}
+		c.Next()
+	}
+}
+
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
@@ -3243,6 +3292,77 @@ func engineBinaryPath(enginesDir, registryDir, key string, vj map[string]interfa
 	return ""
 }
 
+func probeEngineMTP(binaryPath string) bool {
+	if strings.TrimSpace(binaryPath) == "" {
+		return false
+	}
+	now := time.Now()
+	engineCapabilityCache.RLock()
+	cached, ok := engineCapabilityCache.items[binaryPath]
+	engineCapabilityCache.RUnlock()
+	if ok && now.Sub(cached.checkedAt) < engineCapabilityTTL {
+		return cached.supportsMTP
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binaryPath, "--help")
+	output, err := cmd.CombinedOutput()
+	supportsMTP := false
+	if err == nil || len(output) > 0 {
+		help := strings.ToLower(string(output))
+		supportsMTP = strings.Contains(help, "draft-mtp") && strings.Contains(help, "spec-type")
+	}
+	engineCapabilityCache.Lock()
+	engineCapabilityCache.items[binaryPath] = engineCapability{supportsMTP: supportsMTP, checkedAt: now}
+	engineCapabilityCache.Unlock()
+	return supportsMTP
+}
+
+func enrichEngineCapabilities(engine gin.H) {
+	versionParams, ok := engine["version_params"].(map[string]interface{})
+	if !ok {
+		versionParams = map[string]interface{}{}
+	}
+	supportsMTP, explicit := engine["supports_mtp"].(bool)
+	if !explicit {
+		if max, ok := versionParams["spec_draft_n_max"].(float64); ok {
+			supportsMTP = max > 0
+		}
+	}
+	if !supportsMTP && !explicit {
+		binaryPath, _ := engine["binary_path"].(string)
+		supportsMTP = probeEngineMTP(binaryPath)
+	}
+	engine["supports_mtp"] = supportsMTP
+	if supportsMTP {
+		if _, ok := versionParams["spec_draft_n_max"]; !ok {
+			versionParams["spec_draft_n_max"] = 3
+		}
+		features := make([]interface{}, 0)
+		switch raw := engine["features"].(type) {
+		case []interface{}:
+			features = append(features, raw...)
+		case []string:
+			for _, feature := range raw {
+				features = append(features, feature)
+			}
+		}
+		hasMTP := false
+		for _, feature := range features {
+			if strings.EqualFold(fmt.Sprint(feature), "mtp") {
+				hasMTP = true
+				break
+			}
+		}
+		if !hasMTP {
+			features = append(features, "MTP")
+		}
+		engine["features"] = features
+	}
+	engine["version_params"] = versionParams
+}
+
 func handleGetEngines(cfg *shared.Config, httpClient *shared.HTTPClient) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		enginesDir := "/data/engines"
@@ -3283,6 +3403,7 @@ func handleGetEngines(cfg *shared.Config, httpClient *shared.HTTPClient) gin.Han
 				if eng["name"] == nil || eng["name"] == "" {
 					eng["name"] = key
 				}
+				enrichEngineCapabilities(eng)
 				engines = append(engines, eng)
 			}
 		}
@@ -4051,6 +4172,7 @@ func scanEngines() []gin.H {
 			"upstream_tag": vj["upstream_tag"], "github_url": vj["github_url"],
 			"binary_path": engineBinaryPath(enginesDir, registryDir, key, vj), "version_params": vj["version_params"],
 		})
+		enrichEngineCapabilities(engines[len(engines)-1])
 	}
 	return engines
 }
