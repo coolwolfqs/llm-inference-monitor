@@ -1,0 +1,7 @@
+# Model Manager may only control its supervised inference unit and replace the
+# validated launcher through the fixed root-owned helper. No generic rm/mv or
+# arbitrary systemctl permissions are granted.
+draco ALL=(root) NOPASSWD: /usr/local/bin/write-start-llama-server.sh
+draco ALL=(root) NOPASSWD: /bin/systemctl restart inference-server
+draco ALL=(root) NOPASSWD: /bin/systemctl stop inference-server
+draco ALL=(root) NOPASSWD: /bin/systemctl reset-failed inference-server
