@@ -72,6 +72,32 @@ const draftCacheTypes = computed(() => {
   return values?.length ? values : cacheTypes.value
 })
 
+function projectorForValue(value: string) {
+  const wanted = String(value || '').trim()
+  if (!wanted) return undefined
+  return projectors.value.find((item) =>
+    item.id === wanted
+    || item.name === wanted
+    || item.path === wanted
+    || item.relative_path === wanted,
+  )
+}
+
+function normalizeProjectorSelection(companions: ProjectionArtifact[]) {
+  const inherited = String(form.mmproj_file || '').trim()
+  const validInherited = companions.find((item) =>
+    item.id === inherited
+    || item.name === inherited
+    || item.path === inherited
+    || item.relative_path === inherited,
+  )
+  // Keep the previous checkbox/selection only when its projector belongs to
+  // the newly selected model bundle. Never carry a previous model's path
+  // into a drawer that has no matching visual component.
+  form.mmproj_file = props.currentConfig.mmproj && validInherited ? validInherited.id : ''
+  form.mmproj = Boolean(form.mmproj_file)
+}
+
 function keepCacheSelection() {
   const targetDefault = cacheTypes.value.includes('q8_0') ? 'q8_0' : (cacheTypes.value[0] || 'q8_0')
   const draftDefault = draftCacheTypes.value.includes('q8_0') ? 'q8_0' : (draftCacheTypes.value[0] || 'q8_0')
@@ -104,6 +130,7 @@ onMounted(async () => {
     preflight.value = check
     engines.value = available.filter((item) => item.type !== 'vllm')
     projectors.value = companions
+    normalizeProjectorSelection(companions)
     form.engine = check.default_engine || check.compatible_engines[0] || 'llama'
     const rememberedEngine = window.localStorage.getItem('model-manager:last-engine')
     const engineCandidates = [
@@ -120,10 +147,6 @@ onMounted(async () => {
     // so explicitly clear a previously saved MTP selection once the actual
     // selected engine is known.
     if (!engineSupportsMtp.value) mtpEnabled.value = false
-    if (!form.mmproj_file && companions.length === 1) {
-      form.mmproj_file = companions[0].id
-      form.mmproj = true
-    }
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : '部署预检失败'
   } finally {
@@ -141,7 +164,11 @@ async function submit() {
     form.spec_type = useMtp && ngramEnabled.value ? 'draft-mtp,ngram-mod' : useMtp ? 'draft-mtp' : ngramEnabled.value ? 'ngram-mod' : 'none'
     form.spec_draft_n_max = useMtp ? Math.max(1, form.spec_draft_n_max) : 0
     if (form.draft_model_id) form.spec_draft_n_max = Math.max(1, form.spec_draft_n_max)
-    form.mmproj = Boolean(form.mmproj_file)
+    // Submit only the canonical id of a projector offered for this model.
+    // This is a second defensive boundary against stale runtime config.
+    const selectedProjector = projectorForValue(form.mmproj_file)
+    form.mmproj_file = selectedProjector?.id || ''
+    form.mmproj = Boolean(selectedProjector)
     const check = await api.preflight(props.model.id)
     if (!check.can_deploy) throw new Error(check.blockers.join('；') || '部署预检未通过')
     const task = await api.deploy(form)
@@ -180,7 +207,7 @@ async function submit() {
 
         <section class="form-section">
           <h3>模型增强</h3>
-          <label v-if="projectors.length" class="full-field"><span>视觉投影组件</span><select v-model="form.mmproj_file"><option value="">不加载视觉组件</option><option v-for="projector in projectors" :key="projector.id" :value="projector.id">{{ projector.name }} · {{ Math.round(projector.size / 1024 / 1024) }}MB</option></select></label>
+          <label class="full-field"><span>视觉投影组件</span><select v-model="form.mmproj_file"><option value="">不加载视觉组件</option><option v-for="projector in projectors" :key="projector.id" :value="projector.id">{{ projector.name }} · {{ Math.round(projector.size / 1024 / 1024) }}MB</option></select><small>{{ projectors.length ? '仅展示与当前主模型同包的视觉组件；可明确选择不加载' : '当前模型包没有可匹配的视觉组件，默认不加载' }}</small></label>
           <div class="enhancement-grid">
             <label class="check-card"><input v-model="mtpEnabled" type="checkbox" :disabled="!mtpAvailable || Boolean(form.draft_model_id)" /><span><strong>MTP 推测解码</strong><small>{{ mtpAvailable ? '使用模型自带草稿预测' : supportsMtp ? '当前引擎不支持 MTP，已默认关闭' : '当前模型未识别为 MTP，默认关闭' }}</small></span></label>
             <label class="check-card"><input v-model="ngramEnabled" type="checkbox" :disabled="selectedEngine && selectedEngine.supports_ngram === false" /><span><strong>n-gram 加速</strong><small>匹配历史 token 序列，默认关闭</small></span></label>

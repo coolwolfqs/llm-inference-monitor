@@ -316,7 +316,17 @@ def classify_model(
     )
     general_type = str(metadata.get("general.type") or "model").lower()
 
-    if "mmproj" in lower or general_type in {"clip", "projector"}:
+    # Some bundled vision projectors (notably Qwen `*-vision-f16.gguf`) do
+    # not set `general.type=clip` and do not include `mmproj` in the filename;
+    # their GGUF architecture is still `clip`. Treat that authoritative
+    # architecture as a projection component so the deployment drawer can
+    # offer an explicit projector / no-projector choice.
+    architecture_lower = architecture.lower()
+    if (
+        "mmproj" in lower
+        or general_type in {"clip", "projector"}
+        or architecture_lower in {"clip", "projector"}
+    ):
         role = "projection"
     elif re.search(r"(?:^|[-_])(draft|dflash|eagle)(?:[-_.]|$)", lower):
         role = "draft"

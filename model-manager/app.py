@@ -2109,7 +2109,13 @@ async def deploy_model(request: Request):
     ngl = data.get("ngl", 99)
     concurrency = data.get("concurrency", 2)
     mmproj = data.get("mmproj", False)
-    mmproj_file = data.get("mmproj_file", "")
+    mmproj = mmproj is True or str(mmproj).lower() in {"1", "true", "on", "yes"}
+    mmproj_file = str(data.get("mmproj_file", "") or "").strip()
+    # A drawer may retain the previous runtime's checkbox state, but a
+    # projector value is only meaningful when the visual option is selected.
+    # Drop a stale cross-model filename before any path or bundle validation.
+    if not mmproj:
+        mmproj_file = ""
     k_cache_type = data.get("k_cache_type", "q8_0")
     v_cache_type = data.get("v_cache_type", "q8_0")
     host = data.get("host", "0.0.0.0")

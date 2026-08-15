@@ -1,0 +1,61 @@
+/* Model-center type scale: a small desktop increase with a touch-friendly mobile step. */
+body { font-size: 15px; }
+.brand-block strong { font-size: 16px; }
+.brand-block span, .sidebar-heading, .sidebar-group > p { font-size: 11px; }
+.product-nav a, .nav-filter, .page-heading p, .button { font-size: 13px; }
+.service-state { font-size: 12px; }
+.nav-filter b, .button.compact { font-size: 12px; }
+.stats-grid span { font-size: 11px; }
+.stats-grid strong { font-size: 23px; }
+.stats-grid small { font-size: 10px; }
+.runtime-left span { font-size: 10px; }
+.runtime-left strong { font-size: 14px; }
+.runtime-left p, .runtime-config span { font-size: 10px; }
+.search-box input { font-size: 13px; }
+.sort-select, .form-grid select, .form-grid input, .full-field input, .full-field select { font-size: 12px; }
+.tag-filter-bar > span, .form-grid label, .full-field { font-size: 11px; }
+.tag-filter-bar button { font-size: 10px; }
+.model-title-line h3 { font-size: 14px; }
+.tag { font-size: 9px; }
+.filename { font-size: 11px; }
+.metadata { font-size: 10px; }
+.empty-state strong { font-size: 14px; }
+.empty-state p { font-size: 12px; }
+.operation-list > div { font-size: 10px; }
+.drawer-header h2, .dialog h2 { font-size: 21px; }
+.drawer-header p { font-size: 10px; }
+.form-section h3 { font-size: 13px; }
+.feature-row span { font-size: 9px; }
+.toast { font-size: 12px; }
+
+@media (max-width: 760px) {
+  body { font-size: 16px; }
+  .topbar { height: 60px; }
+  .nav-filter { min-height: 44px; font-size: 15px; }
+  .nav-filter b { font-size: 12px; }
+  .page-heading h1 { font-size: 28px; }
+  .button { min-height: 40px; font-size: 14px; }
+  .button.compact { min-height: 36px; font-size: 13px; }
+  .stats-grid span { font-size: 12px; }
+  .stats-grid strong { font-size: 24px; }
+  .stats-grid small { font-size: 11px; }
+  .runtime-left span { font-size: 11px; }
+  .runtime-left strong { font-size: 15px; }
+  .runtime-left p, .runtime-config span { font-size: 11px; }
+  .search-box input, .sort-select, .form-grid select, .form-grid input,
+  .full-field input, .full-field select { font-size: 14px; }
+  .tag-filter-bar > span, .form-grid label, .full-field { font-size: 12px; }
+  .tag-filter-bar button { font-size: 11px; }
+  .model-title-line h3 { font-size: 15px; }
+  .tag { font-size: 10px; }
+  .filename { font-size: 12px; }
+  .metadata { font-size: 11px; }
+  .empty-state strong { font-size: 15px; }
+  .empty-state p { font-size: 13px; }
+  .operation-list > div { font-size: 11px; }
+  .drawer-header h2, .dialog h2 { font-size: 23px; }
+  .drawer-header p { font-size: 11px; }
+  .form-section h3 { font-size: 14px; }
+  .feature-row span { font-size: 10px; }
+  .toast { font-size: 13px; }
+}

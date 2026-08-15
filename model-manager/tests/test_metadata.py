@@ -122,6 +122,22 @@ class MetadataTests(unittest.TestCase):
         self.assertFalse(result["deployable"])
         self.assertEqual(result["supported_engines"], [])
 
+    def test_clip_architecture_vision_bundle_is_projection(self):
+        """Qwen vision-f16 bundles may omit general.type=clip and mmproj in the name."""
+        result = classify_model(
+            model_id="Qwen3.8-27B-Uncensored/Qwen3.8-27B-Uncensored-vision-f16.gguf",
+            filename="Qwen3.8-27B-Uncensored-vision-f16.gguf",
+            model_format="GGUF",
+            metadata={
+                "general.architecture": "clip",
+                "general.type": "model",
+                "general.name": "Qwen3.8-27B vision projector",
+            },
+        )
+        self.assertEqual(result["role"], "projection")
+        self.assertFalse(result["deployable"])
+        self.assertIn("Vision", result["capabilities"])
+
     def test_dflash_artifact_is_a_non_deployable_draft_component(self):
         result = classify_model(
             model_id="Muse-Glimmer-30B-GGUF/dflash-kquant.gguf",

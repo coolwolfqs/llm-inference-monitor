@@ -63,6 +63,8 @@ export interface ProjectionArtifact {
   id: string
   name: string
   size: number
+  path?: string
+  relative_path?: string
   relative_dir?: string
 }
 
