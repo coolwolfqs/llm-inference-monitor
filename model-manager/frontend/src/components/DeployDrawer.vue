@@ -91,10 +91,11 @@ function normalizeProjectorSelection(companions: ProjectionArtifact[]) {
     || item.path === inherited
     || item.relative_path === inherited,
   )
-  // Keep the previous checkbox/selection only when its projector belongs to
-  // the newly selected model bundle. Never carry a previous model's path
-  // into a drawer that has no matching visual component.
-  form.mmproj_file = props.currentConfig.mmproj && validInherited ? validInherited.id : ''
+  // Keep the previous selection only when its projector belongs to the new
+  // model bundle. Otherwise default to the first projector in this bundle;
+  // never carry a previous model's path across model drawers.
+  const defaultProjector = validInherited || companions[0]
+  form.mmproj_file = defaultProjector?.id || ''
   form.mmproj = Boolean(form.mmproj_file)
 }
 

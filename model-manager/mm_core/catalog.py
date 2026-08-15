@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -122,10 +123,19 @@ class CatalogService:
         else:
             embedded = read_gguf_metadata(path)
             self._gguf_metadata_cache[cache_key] = (fingerprint, embedded)
+        # Extensor publishers use both ``.extensor.gguf`` and
+        # ``-extensor.gguf`` suffixes.  Treat either spelling as the custom
+        # format; otherwise the ordinary GGUF path would incorrectly expose
+        # an unsupported artifact as deployable by llama.cpp.
+        model_format = (
+            "EXTENSOR"
+            if re.search(r"[.-]extensor\.gguf$", path.name, re.IGNORECASE)
+            else "GGUF"
+        )
         classification = classify_model(
             model_id=model_id,
             filename=path.name,
-            model_format="GGUF",
+            model_format=model_format,
             metadata=embedded,
             override=self._override_for(overrides, model_id, path.name),
         )
@@ -142,7 +152,7 @@ class CatalogService:
             "size_human": format_size(stat.st_size),
             "modified": stat.st_mtime,
             "ctx_default": classification["context_length"],
-            "format": "GGUF",
+            "format": model_format,
             "quant_type": classification["quantization"] or "",
             "tags": classification["tags"],
             "role": classification["role"],

@@ -454,9 +454,21 @@ def classify_model(
 
     supported_engines = []
     if role == "model":
-        supported_engines = ["llama"] if model_format == "GGUF" else ["vllm"]
+        if model_format == "GGUF":
+            supported_engines = ["llama"]
+        elif model_format == "HF":
+            supported_engines = ["vllm"]
 
     warnings: list[dict[str, Any]] = []
+    if model_format == "EXTENSOR":
+        warnings.append(
+            {
+                "code": "unsupported_model_format",
+                "field": "format",
+                "value": "EXTENSOR",
+                "message": "当前 llama.cpp 未注册 EXTENSOR 专用推理引擎",
+            }
+        )
     if embedded_quantization and filename_quantization and embedded_quantization != filename_quantization:
         warnings.append(
             {

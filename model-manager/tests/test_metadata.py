@@ -138,6 +138,20 @@ class MetadataTests(unittest.TestCase):
         self.assertFalse(result["deployable"])
         self.assertIn("Vision", result["capabilities"])
 
+    def test_extensor_variant_is_not_deployable_by_llama(self):
+        result = classify_model(
+            model_id="Qwen3.6-35B-A3B-MTP/Qwen3.6-35B-A3B-EXTENSOR-ROCmFP4-v1.extensor.gguf",
+            filename="Qwen3.6-35B-A3B-EXTENSOR-ROCmFP4-v1.extensor.gguf",
+            model_format="EXTENSOR",
+            metadata={
+                "general.architecture": "qwen35moe",
+                "general.name": "Qwen3.6-35B-A3B EXTENSOR ROCmFP4 v1",
+            },
+        )
+        self.assertEqual(result["supported_engines"], [])
+        self.assertFalse(result["deployable"])
+        self.assertEqual(result["warnings"][0]["code"], "unsupported_model_format")
+
     def test_dflash_artifact_is_a_non_deployable_draft_component(self):
         result = classify_model(
             model_id="Muse-Glimmer-30B-GGUF/dflash-kquant.gguf",
@@ -184,6 +198,24 @@ class MetadataTests(unittest.TestCase):
 
 
 class CatalogTests(unittest.TestCase):
+    def test_extensor_hyphen_suffix_is_not_deployable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "Qwen3.6-35B-A3B-EXTENSOR-ROCmFP4-v1-extensor.gguf"
+            _write_minimal_gguf(
+                path,
+                {
+                    "general.architecture": "qwen35moe",
+                    "general.type": "model",
+                    "general.name": "Qwen3.6-35B-A3B EXTENSOR ROCmFP4 v1",
+                },
+                pad_mb=101,
+            )
+            model = CatalogService(root, ttl_seconds=60).list_models()[0]
+        self.assertEqual(model["format"], "EXTENSOR")
+        self.assertFalse(model["deployable"])
+        self.assertEqual(model["supported_engines"], [])
+
     def test_nested_files_receive_stable_relative_ids(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -1199,10 +1199,44 @@ def update_persist_state(engine="llama", binary="", model="", args=""):
     config_path = "/data/inference-hub/state/persist_config.json"
     _atomic_write_text(config_path, json.dumps(config, indent=2) + "\n")
 
+def _inference_systemd_state() -> dict[str, str]:
+    """Read the supervised inference unit without scanning processes."""
+    try:
+        result = subprocess.run(
+            [
+                "systemctl", "show", "inference-server.service",
+                "-p", "ActiveState", "-p", "SubState", "-p", "Result",
+                "-p", "MainPID",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    state: dict[str, str] = {}
+    for line in (result.stdout or "").splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            state[key] = value
+    return state
+
+def _inference_health_ready() -> bool:
+    """Require llama-server's loaded-model health, not just an open socket."""
+    url = f"http://{settings.inference_host}:{settings.inference_port}/health"
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url), timeout=2) as response:
+            return response.status == 200
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError):
+        return False
+
 def _wait_for_inference(expected_model_path="", expected_engine="", timeout=180):
     deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    next_state_check = 0.0
     expected = str(Path(expected_model_path).resolve()) if expected_model_path else ""
     while time.monotonic() < deadline:
+        now = time.monotonic()
         runtime = _get_running_cmdline_config(force=True)
         if runtime:
             observed = runtime.get("model_path") or ""
@@ -1217,9 +1251,21 @@ def _wait_for_inference(expected_model_path="", expected_engine="", timeout=180)
                     with socket.create_connection(
                         (settings.inference_host, settings.inference_port), timeout=1
                     ):
-                        return runtime
+                        if _inference_health_ready():
+                            return runtime
                 except OSError:
                     pass
+        if now >= next_state_check:
+            state = _inference_systemd_state()
+            active_state = state.get("ActiveState", "")
+            if now - started >= 5 and active_state not in {"active", "activating", "reloading"}:
+                detail = ", ".join(
+                    f"{key}={state[key]}"
+                    for key in ("ActiveState", "SubState", "Result", "MainPID")
+                    if state.get(key)
+                ) or "systemd 状态不可用"
+                raise RuntimeError(f"推理服务启动失败（{detail}）")
+            next_state_check = now + 2
         time.sleep(0.5)
     raise RuntimeError("推理服务未在限定时间内达到目标模型/引擎就绪状态")
 
@@ -1772,7 +1818,10 @@ async def model_preflight(model_id: str):
     ]
     blockers = []
     if not model.get("deployable"):
-        blockers.append(f"{model.get('category')} 不能独立部署")
+        if model.get("format") == "EXTENSOR":
+            blockers.append("EXTENSOR GGUF 需要专用推理引擎，当前 llama.cpp 不支持")
+        else:
+            blockers.append(f"{model.get('category')} 不能独立部署")
     if supported and not ready:
         blockers.append(f"节点未注册兼容引擎；模型需要 {sorted(supported)}")
     projectors = [
@@ -1791,6 +1840,7 @@ async def model_preflight(model_id: str):
             for item in llama_engines
             if item.get("key") == active_engine
         ),
+        None,
     ) or (llama_engines[0].get("key") if llama_engines else None)
     return {
         "model": model,
@@ -2101,6 +2151,8 @@ async def deploy_model(request: Request):
         raise HTTPException(404, "模型不存在或 basename 不唯一，请使用 catalog model id")
     filename = model_record.get("relative_path", model_record["id"])
     filepath = await asyncio.to_thread(_safe_model_path, filename, True)
+    if model_record.get("format") == "EXTENSOR":
+        raise HTTPException(409, "EXTENSOR GGUF 需要专用推理引擎，当前 llama.cpp 不支持")
     if not model_record.get("deployable"):
         raise HTTPException(409, f"{model_record.get('category', '该组件')} 不能作为主模型独立部署")
 
@@ -2108,9 +2160,14 @@ async def deploy_model(request: Request):
     ctx_size = data.get("ctx_size")
     ngl = data.get("ngl", 99)
     concurrency = data.get("concurrency", 2)
-    mmproj = data.get("mmproj", False)
-    mmproj = mmproj is True or str(mmproj).lower() in {"1", "true", "on", "yes"}
+    mmproj_raw = data.get("mmproj")
+    mmproj = mmproj_raw is True or str(mmproj_raw).lower() in {"1", "true", "on", "yes"}
     mmproj_file = str(data.get("mmproj_file", "") or "").strip()
+    if mmproj_raw is None:
+        # Legacy callers that do not send the visual checkbox get the safe
+        # same-bundle default, never the previous model's projector path.
+        mmproj_file = await asyncio.to_thread(_match_mmproj_for_model, model_record["id"])
+        mmproj = bool(mmproj_file)
     # A drawer may retain the previous runtime's checkbox state, but a
     # projector value is only meaningful when the visual option is selected.
     # Drop a stale cross-model filename before any path or bundle validation.
