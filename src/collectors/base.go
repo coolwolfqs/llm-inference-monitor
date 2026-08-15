@@ -30,6 +30,7 @@ type BaseCollector struct {
 	interval     time.Duration
 	store        *shared.MetricsStore
 	stopCh       chan struct{}
+	stopOnce     sync.Once
 	wg           sync.WaitGroup
 	latestMu     sync.RWMutex
 	latest       interface{}
@@ -40,6 +41,9 @@ type BaseCollector struct {
 }
 
 func NewBaseCollector(name string, enabled bool, intervalSec int, store *shared.MetricsStore) *BaseCollector {
+	if intervalSec <= 0 {
+		intervalSec = 1
+	}
 	return &BaseCollector{
 		name:     name,
 		enabled:  enabled,
@@ -155,7 +159,7 @@ func (b *BaseCollector) LatestAny() (interface{}, time.Time, bool) {
 
 // Stop gracefully stops the collector
 func (b *BaseCollector) Stop() {
-	close(b.stopCh)
+	b.stopOnce.Do(func() { close(b.stopCh) })
 	b.wg.Wait()
 }
 

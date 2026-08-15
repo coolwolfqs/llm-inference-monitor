@@ -128,6 +128,7 @@ func main() {
 	}
 
 	router := setupRouter(cfg, store, httpClient, globalKVEngine)
+	startV2EventBroadcaster(cfg, httpClient)
 
 	addr := cfg.DashboardAddr()
 	requestCtx, cancelRequests := context.WithCancel(context.Background())
@@ -173,7 +174,10 @@ func main() {
 	}
 	shutdownHTTPServers(servers, time.Second)
 
-	store.Flush()
+	if err := store.Close(); err != nil {
+		shared.Errorf("MetricsStore close failed: %v", err)
+	}
+	stopV2EventBroadcaster()
 	shared.Infof("Server exited")
 }
 
@@ -566,21 +570,50 @@ func handleMetricsQueryRange() gin.HandlerFunc {
 			c.JSON(400, gin.H{"error": "query parameter required"})
 			return
 		}
-		vmURL := cfg.Services.VictoriaMetrics.URL + cfg.Services.VictoriaMetrics.QueryRangePath +
-			fmt.Sprintf("?query=%s&start=%s&end=%s&step=%s",
-				url.QueryEscape(query), start, end, step)
+		if len(query) > 4096 || len(start) > 64 || len(end) > 64 || len(step) > 32 {
+			c.JSON(400, gin.H{"error": "metrics query parameters are too large"})
+			return
+		}
+		values := url.Values{}
+		values.Set("query", query)
+		if start != "" {
+			values.Set("start", start)
+		}
+		if end != "" {
+			values.Set("end", end)
+		}
+		if step != "" {
+			values.Set("step", step)
+		}
+		vmURL := cfg.Services.VictoriaMetrics.URL + cfg.Services.VictoriaMetrics.QueryRangePath + "?" + values.Encode()
 		proxyToVM(c, vmURL)
 	}
 }
 
 func proxyToVM(c *gin.Context, vmURL string) {
-	resp, err := http.Get(vmURL)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, vmURL, nil)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
 	defer resp.Body.Close()
-	c.DataFromReader(resp.StatusCode, resp.ContentLength, resp.Header.Get("Content-Type"), resp.Body, nil)
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 16<<20+1))
+	if readErr != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": readErr.Error()})
+		return
+	}
+	if len(body) > 16<<20 {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "metrics response too large"})
+		return
+	}
+	c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), body)
 }
 
 // ===== SSE =====
@@ -2122,10 +2155,14 @@ func buildSystemPanelData() gin.H {
 			}
 		}
 	}
-	var uts syscall.Utsname
-	if err := syscall.Uname(&uts); err == nil {
-		osInfo["kernel"] = string(runeSlice(uts.Release[:]))
-		osInfo["arch"] = string(runeSlice(uts.Machine[:]))
+	if out, err := exec.Command("uname", "-sr").Output(); err == nil {
+		parts := strings.Fields(string(out))
+		if len(parts) > 0 {
+			osInfo["kernel"] = strings.Join(parts, " ")
+		}
+		if runtime.GOARCH != "" {
+			osInfo["arch"] = runtime.GOARCH
+		}
 	}
 	if tz, err := time.LoadLocation("Local"); err == nil {
 		osInfo["timezone"] = tz.String()
@@ -2192,18 +2229,6 @@ func buildSystemPanelData() gin.H {
 		"services":  svcs,
 		"timestamp": time.Now().Unix(),
 	}
-}
-
-// runeSlice converts []int8 to string (for syscall.Utsname)
-func runeSlice(s []int8) string {
-	r := make([]rune, 0, len(s))
-	for _, c := range s {
-		if c == 0 {
-			break
-		}
-		r = append(r, rune(c))
-	}
-	return string(r)
 }
 
 func buildHardwarePanelData(cfg *shared.Config) gin.H {
@@ -2575,6 +2600,17 @@ func handleGetPersist(cfg *shared.Config, httpClient *shared.HTTPClient) gin.Han
 // postModelManagerJSON adds the internal control-plane credential when the
 // gateway mutates model-manager state. The browser-facing ADMIN_KEY is only
 // for the gateway boundary and must not be forwarded as the upstream key.
+func readLimitedRequestBody(body io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, maxProxyBodyBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxProxyBodyBytes {
+		return nil, fmt.Errorf("request body exceeds %d bytes", maxProxyBodyBytes)
+	}
+	return data, nil
+}
+
 func postModelManagerJSON(c *gin.Context, httpClient *shared.HTTPClient, endpoint string, body []byte) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -2589,7 +2625,7 @@ func postModelManagerJSON(c *gin.Context, httpClient *shared.HTTPClient, endpoin
 
 func handleSetPersist(cfg *shared.Config, httpClient *shared.HTTPClient) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		body, err := io.ReadAll(c.Request.Body)
+		body, err := readLimitedRequestBody(c.Request.Body)
 		if err != nil {
 			c.JSON(400, gin.H{"error": "failed to read body"})
 			return
@@ -2925,7 +2961,7 @@ func handleProxyClusterNodes(cfg *shared.Config, httpClient *shared.HTTPClient) 
 
 func handleProxyAddRecent(cfg *shared.Config, httpClient *shared.HTTPClient) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		body, err := io.ReadAll(c.Request.Body)
+		body, err := readLimitedRequestBody(c.Request.Body)
 		if err != nil {
 			c.JSON(400, gin.H{"error": "failed to read body"})
 			return
@@ -2943,7 +2979,7 @@ func handleProxyAddRecent(cfg *shared.Config, httpClient *shared.HTTPClient) gin
 
 func handleProxyToggleFav(cfg *shared.Config, httpClient *shared.HTTPClient) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		body, err := io.ReadAll(c.Request.Body)
+		body, err := readLimitedRequestBody(c.Request.Body)
 		if err != nil {
 			c.JSON(400, gin.H{"error": "failed to read body"})
 			return
@@ -3048,7 +3084,7 @@ func handleLegacyModelsList(cfg *shared.Config, httpClient *shared.HTTPClient) g
 
 func handleProxyDeploy(cfg *shared.Config, httpClient *shared.HTTPClient) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		body, err := io.ReadAll(c.Request.Body)
+		body, err := readLimitedRequestBody(c.Request.Body)
 		if err != nil {
 			c.JSON(400, gin.H{"error": "failed to read body"})
 			return
@@ -3067,7 +3103,7 @@ func handleProxyDeploy(cfg *shared.Config, httpClient *shared.HTTPClient) gin.Ha
 
 func handleSwitchModel(cfg *shared.Config, httpClient *shared.HTTPClient) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		body, err := io.ReadAll(c.Request.Body)
+		body, err := readLimitedRequestBody(c.Request.Body)
 		if err != nil {
 			c.JSON(400, gin.H{"error": "failed to read body"})
 			return
@@ -3099,7 +3135,7 @@ func handleProxyQuickSwitchGet(cfg *shared.Config, httpClient *shared.HTTPClient
 
 func handleProxyQuickSwitchPost(cfg *shared.Config, httpClient *shared.HTTPClient) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		body, err := io.ReadAll(c.Request.Body)
+		body, err := readLimitedRequestBody(c.Request.Body)
 		if err != nil {
 			c.JSON(400, gin.H{"error": "failed to read body"})
 			return
@@ -3170,8 +3206,37 @@ func handleGPUPowerLimit() gin.HandlerFunc {
 			c.JSON(400, gin.H{"error": "invalid request"})
 			return
 		}
+		if req.GPUID < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "gpu_id must be non-negative"})
+			return
+		}
+		if req.Limit < 1 || req.Limit > 2000 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "limit_watts must be between 1 and 2000"})
+			return
+		}
+		if cfg := shared.GetConfig(); cfg != nil {
+			if aggregate := cachedGPUData(cfg); aggregate != nil {
+				var selected *shared.GPUMetrics
+				for index := range aggregate.GPUs {
+					if aggregate.GPUs[index].Index == req.GPUID {
+						selected = &aggregate.GPUs[index]
+						break
+					}
+				}
+				if selected == nil {
+					c.JSON(http.StatusNotFound, gin.H{"error": "gpu_id not found"})
+					return
+				}
+				if strings.EqualFold(selected.Vendor, "amd") {
+					c.JSON(http.StatusNotImplemented, gin.H{"error": "AMD GPU power limit control is not supported by this node"})
+					return
+				}
+			}
+		}
 
-		cmd := exec.Command("sudo", "nvidia-smi", "-i", strconv.Itoa(req.GPUID), "-pl", fmt.Sprintf("%.0f", req.Limit))
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "sudo", "nvidia-smi", "-i", strconv.Itoa(req.GPUID), "-pl", fmt.Sprintf("%.0f", req.Limit))
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			c.JSON(500, gin.H{"error": string(out)})
@@ -3436,7 +3501,7 @@ func handleGetEngines(cfg *shared.Config, httpClient *shared.HTTPClient) gin.Han
 
 func handleSwitchEngine(cfg *shared.Config, httpClient *shared.HTTPClient) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		body, err := io.ReadAll(c.Request.Body)
+		body, err := readLimitedRequestBody(c.Request.Body)
 		if err != nil {
 			c.JSON(400, gin.H{"error": "invalid request"})
 			return
@@ -3528,7 +3593,7 @@ func handleGetLlamaParams(cfg *shared.Config, httpClient *shared.HTTPClient) gin
 
 func handleSetLlamaParams(cfg *shared.Config, httpClient *shared.HTTPClient) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		body, err := io.ReadAll(c.Request.Body)
+		body, err := readLimitedRequestBody(c.Request.Body)
 		if err != nil {
 			c.JSON(400, gin.H{"error": "failed to read body"})
 			return
@@ -3996,6 +4061,7 @@ func cachedV2Sections(cfg *shared.Config, httpClient *shared.HTTPClient) gin.H {
 
 func handleV2Snapshot(cfg *shared.Config, httpClient *shared.HTTPClient) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		freshness := collectorFreshness()
 		now := time.Now()
 		c.JSON(http.StatusOK, gin.H{
 			"schema_version": "2.0",
@@ -4003,48 +4069,26 @@ func handleV2Snapshot(cfg *shared.Config, httpClient *shared.HTTPClient) gin.Han
 			"collected_at":   now.Unix(),
 			"event_cursor":   atomic.LoadUint64(&v2EventCursor),
 			"sections":       cachedV2Sections(cfg, httpClient),
-			"freshness":      collectorFreshness(),
-			"quality":        gin.H{"system": gin.H{"available": true}, "gpus": gin.H{"available": true}, "inference": gin.H{"available": true}},
+			"freshness":      freshness,
+			"quality":        v2Quality(freshness),
 			"history":        getHistory(cfg),
 			"stream":         gin.H{"connected": true, "source": "inference-hub-v3", "error": nil},
 		})
 	}
 }
 
-func handleV2Events(cfg *shared.Config, httpClient *shared.HTTPClient) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.Header("Content-Type", "text/event-stream")
-		c.Header("Cache-Control", "no-cache")
-		c.Header("Connection", "keep-alive")
-		c.Header("X-Accel-Buffering", "no")
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-		ctx := c.Request.Context()
-		send := func() {
-			id := atomic.AddUint64(&v2EventCursor, 1)
-			now := time.Now()
-			event := gin.H{
-				"id": id, "type": "metrics.fast", "schema_version": "2.0",
-				"collected_at": now.Unix(), "data": gin.H{"sections": cachedV2Sections(cfg, httpClient)},
-			}
-			c.SSEvent("metrics.fast", event)
-			c.Writer.Flush()
-		}
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			send()
-		}
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				send()
-			}
+func v2Quality(freshness map[string]shared.SourceFreshness) gin.H {
+	result := gin.H{}
+	for _, key := range []string{"system", "gpus", "inference"} {
+		source := freshness[key]
+		result[key] = gin.H{
+			"available":  source.CollectedAtUnixMs > 0 && source.Status != "unavailable",
+			"status":     source.Status,
+			"age_ms":     source.AgeMs,
+			"last_error": source.LastError,
 		}
 	}
+	return result
 }
 
 // ===== Unified Aggregation Endpoints =====
@@ -4220,6 +4264,8 @@ func parseLlamaParams() map[string]interface{} {
 
 // ===== Proxy Routes =====
 
+const maxProxyBodyBytes = 8 << 20
+
 func registerReadWriteProxy(r *gin.Engine, pattern string, auth gin.HandlerFunc, proxy gin.HandlerFunc) {
 	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodOptions} {
 		r.Handle(method, pattern, proxy)
@@ -4237,6 +4283,15 @@ func proxyRoutes(r *gin.Engine, cfg *shared.Config, auth gin.HandlerFunc) {
 	}
 
 	// Enhanced model-manager proxy with HTML base href injection
+	modelManagerClient := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:        32,
+			MaxIdleConnsPerHost: 16,
+			IdleConnTimeout:     90 * time.Second,
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse },
+	}
 	modelManagerProxy := func(c *gin.Context) {
 		targetURL := cfg.Services.ModelManager.URL
 		path := c.Param("path")
@@ -4244,21 +4299,32 @@ func proxyRoutes(r *gin.Engine, cfg *shared.Config, auth gin.HandlerFunc) {
 			path = "/"
 		}
 		url := targetURL + path
-		req, _ := http.NewRequest(c.Request.Method, url, c.Request.Body)
+		req, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, url, c.Request.Body)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
 		for k, v := range c.Request.Header {
 			if k != "Host" && k != "Content-Length" {
 				req.Header[k] = v
 			}
 		}
 		req.Host = targetURL
-		client := &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
-		resp, err := client.Do(req)
+		resp, err := modelManagerClient.Do(req)
 		if err != nil {
 			c.JSON(502, gin.H{"error": err.Error()})
 			return
 		}
 		defer resp.Body.Close()
-		body, _ := io.ReadAll(resp.Body)
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxProxyBodyBytes+1))
+		if readErr != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": readErr.Error()})
+			return
+		}
+		if len(body) > maxProxyBodyBytes {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "upstream response too large"})
+			return
+		}
 		ct := resp.Header.Get("Content-Type")
 		if strings.Contains(ct, "text/html") && resp.StatusCode < 400 {
 			html := string(body)
@@ -4331,6 +4397,14 @@ func createProxyHandler(target string, prefix string) gin.HandlerFunc {
 
 func createPathProxyHandler(target, prefix, targetPrefix string) gin.HandlerFunc {
 	targetURL, _ := url.Parse(strings.TrimRight(target, "/"))
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:        16,
+			MaxIdleConnsPerHost: 8,
+			IdleConnTimeout:     90 * time.Second,
+		},
+	}
 	return func(c *gin.Context) {
 		path := c.Param("path")
 		if path == "" {
@@ -4344,7 +4418,7 @@ func createPathProxyHandler(target, prefix, targetPrefix string) gin.HandlerFunc
 		req := c.Request.Clone(c.Request.Context())
 		req.URL = &upstream
 		req.Host = targetURL.Host
-		resp, err := http.DefaultTransport.RoundTrip(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 			return

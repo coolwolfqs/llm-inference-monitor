@@ -11,6 +11,16 @@ WorkingDirectory=/home/draco/llm-speedtest
 ExecStart=/usr/bin/python3 -m uvicorn app:app --host 127.0.0.1 --port 8090
 Restart=always
 RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/draco/llm-speedtest/data
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+MemoryMax=512M
+TasksMax=256
+UMask=0027
 
 [Install]
 WantedBy=multi-user.target
