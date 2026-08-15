@@ -1,0 +1,28 @@
+[Unit]
+Description=LLM speed test loopback bridge for the container control plane
+After=docker.service llm-speedtest.service
+Requires=llm-speedtest.service
+
+[Service]
+Type=simple
+User=draco
+Group=draco
+ExecStart=/usr/bin/socat TCP-LISTEN:8095,bind=172.17.0.1,reuseaddr,fork TCP:127.0.0.1:8090
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+LimitNOFILE=128
+MemoryMax=64M
+TasksMax=64
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
