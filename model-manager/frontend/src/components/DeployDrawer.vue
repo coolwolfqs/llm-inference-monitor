@@ -2,11 +2,15 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { CheckCircle2, ChevronDown, Rocket, XCircle } from 'lucide-vue-next'
 import { api } from '../services/api'
-import type { DeployPayload, Engine, EngineParameter, ModelArtifact, Preflight, ProjectionArtifact, RuntimeConfig } from '../types/model'
+import type { DeployPayload, DeploymentPlan, Engine, EngineParameter, ModelArtifact, Preflight, ProjectionArtifact, RuntimeConfig } from '../types/model'
 
 const props = defineProps<{ model: ModelArtifact; currentConfig: RuntimeConfig }>()
 const emit = defineEmits<{ close: []; deployed: [taskId: string] }>()
 const preflight = ref<Preflight>()
+// Preflight is for compatibility and display. The deployment-plan response is
+// the authoritative, name-keyed set of values used by the deploy API.
+const canonicalPlan = ref<DeploymentPlan>()
+let planRequestId = 0
 const engines = ref<Engine[]>([])
 const projectors = ref<ProjectionArtifact[]>([])
 const draftModels = computed(() => preflight.value?.draft_models || [])
@@ -112,6 +116,9 @@ const engineProfiles = computed(() => selectedEngineMatch.value?.profiles || sel
 const profileOptions = computed(() => Object.entries(engineProfiles.value).filter(([, profile]) => profile.compatible !== false))
 const selectedProfile = computed(() => engineProfiles.value[profileId.value])
 const contextPerSlotLimit = computed(() => {
+  const canonicalTotal = Number(canonicalPlan.value?.limits?.ctx_size_max || 0)
+  const canonicalSlots = Math.max(1, Number(canonicalPlan.value?.parameters?.concurrency || 1))
+  if (canonicalTotal > 0) return canonicalTotal / canonicalSlots
   const modelLimit = Number(preflight.value?.requirements?.context_length || 0)
   const profileLimits = Object.values(engineProfiles.value).map((profile) => {
     const slots = Math.max(1, Number(profile.parameters?.concurrency || 1))
@@ -126,7 +133,18 @@ const visibleContextOptions = computed(() => {
   const current = Number(form.ctx_size || 0)
   return current && !options.includes(current) ? [...options, current].sort((a, b) => a - b) : options
 })
-const selectedProfileLabel = computed(() => selectedProfile.value?.label || (profileId.value === 'default' ? '最佳默认' : profileId.value))
+const selectedProfileLabel = computed(() => {
+  const planned = canonicalPlan.value?.parameters || serverProfile.value?.parameters || {}
+  const comparisons: Array<[string, unknown]> = [
+    ['ctx_size', form.ctx_size],
+    ['concurrency', form.concurrency],
+    ['spec_draft_n_max', form.spec_draft_n_max],
+    ['fit', form.fit],
+  ]
+  const matches = comparisons.every(([key, actual]) => planned[key] === undefined || String(planned[key]) === String(actual))
+  if (!matches) return '自定义调度'
+  return selectedProfile.value?.label || (profileId.value === 'default' ? '最佳默认' : profileId.value)
+})
 const contextLabel = computed(() => {
   const size = Number(form.ctx_size || 0)
   return size >= 1048576 ? '1024K' : size >= 1024 ? `${Math.round(size / 1024)}K` : String(size)
@@ -300,7 +318,10 @@ function applyEngineProfile() {
 
 function rememberedConfigKey(engine = form.llama_version) {
   if (!engine) return ''
-  return `model-manager:deploy-config:v4:${encodeURIComponent(props.model.id)}:${encodeURIComponent(engine)}`
+  // v4 could contain values written by the old positional/profile restore
+  // path. A new key prevents a stale browser entry from reintroducing the
+  // field mix-up this drawer is meant to prevent.
+  return `model-manager:deploy-config:v5:${encodeURIComponent(props.model.id)}:${encodeURIComponent(engine)}`
 }
 
 function readRememberedConfig(engine = form.llama_version): RememberedDeployConfig | undefined {
@@ -356,6 +377,7 @@ function selectEngineDefaults(engine: string) {
   keepCacheSelection()
   restoringConfig.value = false
   persistenceReady.value = true
+  void loadCanonicalPlan(engine, profileId.value, !remembered)
 }
 
 function persistRememberedConfig() {
@@ -414,6 +436,55 @@ function keepCacheSelection() {
   if (!draftCacheTypes.value.includes(form.draft_v_cache_type)) form.draft_v_cache_type = draftDefault
 }
 
+function applyResolvedParameters(values: Record<string, unknown>) {
+  const formRecord = form as unknown as Record<string, unknown>
+  // Every visible common control is assigned by its canonical parameter key;
+  // never by the order of the schema array. This is the binding contract for
+  // context/concurrency, draft token count, Fit, KV and the other fields.
+  for (const [parameterKey, formKey] of Object.entries(managedFormAliases)) {
+    if (!Object.prototype.hasOwnProperty.call(values, parameterKey)) continue
+    const value = values[parameterKey]
+    if (value !== undefined && value !== null && value !== '') {
+      formRecord[formKey] = normalizeFormDefault(parameterKey, value)
+    }
+  }
+  form.profile_id = profileId.value
+}
+
+function applyResolvedParameterValues(values: Record<string, unknown>) {
+  for (const parameter of engineParameterSchema.value) {
+    if (parameter.supported === false || parameter.managed) continue
+    if (Object.prototype.hasOwnProperty.call(values, parameter.key) && values[parameter.key] !== undefined) {
+      parameterValues[parameter.key] = values[parameter.key]
+    } else if (!Object.prototype.hasOwnProperty.call(parameterValues, parameter.key)) {
+      delete parameterValues[parameter.key]
+    }
+  }
+}
+
+async function loadCanonicalPlan(
+  engine = form.llama_version,
+  profile = profileId.value,
+  applyToForm = true,
+) {
+  if (!engine) return
+  const requestId = ++planRequestId
+  canonicalPlan.value = undefined
+  try {
+    const plan = await api.deploymentPlan(props.model.id, engine, profile)
+    if (requestId !== planRequestId || engine !== form.llama_version || profile !== profileId.value) return
+    canonicalPlan.value = plan
+    if (applyToForm) {
+      applyResolvedParameters(plan.parameters || {})
+      applyResolvedParameterValues(plan.parameters || {})
+    }
+    keepCacheSelection()
+  } catch {
+    // The preflight profile summary remains a safe fallback. The deploy API
+    // still validates the final payload against the same resolver.
+  }
+}
+
 watch(engineSupportsMtp, (available) => {
   if (!available) mtpEnabled.value = false
 }, { flush: 'sync' })
@@ -431,7 +502,10 @@ watch(() => form.llama_version, (key) => {
 }, { flush: 'sync' })
 
 watch(profileId, () => {
-  if (!restoringConfig.value) applyEngineProfile()
+  if (!restoringConfig.value) {
+    applyEngineProfile()
+    void loadCanonicalPlan()
+  }
 }, { flush: 'sync' })
 
 watch(mtpEnabled, (enabled) => {
@@ -555,8 +629,8 @@ async function submit() {
         <section class="form-section">
           <h3>基础配置</h3>
           <div class="form-grid">
-            <label><span>上下文大小</span><select v-model.number="form.ctx_size"><option v-for="size in visibleContextOptions" :key="size" :value="size">{{ size >= 1048576 ? '1024K' : `${size / 1024}K` }}</option></select><small>上限 {{ Math.round(contextLimit / 1024) }}K（模型窗口 × 并发数）</small></label>
-            <label><span>并发数</span><select v-model.number="form.concurrency"><option v-for="n in 4" :key="n" :value="n">{{ n }}</option></select></label>
+            <label data-field="ctx_size"><span>上下文大小</span><select v-model.number="form.ctx_size"><option v-for="size in visibleContextOptions" :key="size" :value="size">{{ size >= 1048576 ? '1024K' : `${size / 1024}K` }}</option></select><small>上限 {{ Math.round(contextLimit / 1024) }}K（模型窗口 × 并发数）</small></label>
+            <label data-field="concurrency"><span>并发数</span><select v-model.number="form.concurrency"><option v-for="n in 4" :key="n" :value="n">{{ n }}</option></select></label>
           </div>
           <p class="section-default">默认：按模型能力 × 引擎推荐 profile 生成；已保存的本模型配置优先恢复。</p>
           <details class="inline-details">
@@ -568,9 +642,9 @@ async function submit() {
             <label class="full-field"><span>视觉模型</span><select v-model="form.mmproj_file"><option value="">不加载视觉模型</option><option v-for="projector in projectors" :key="projector.id" :value="projector.id">{{ projector.name }} · {{ Math.round(projector.size / 1024 / 1024) }}MB</option></select><small>{{ projectors.length ? '仅展示当前模型目录的匹配项，默认选择最佳匹配' : '当前模型目录没有可匹配的视觉模型' }}</small></label>
             <div class="form-grid enhancement-params">
 <label><span>投机解码</span><select v-model="speculationMode"><option v-for="option in speculationModeOptions" :key="option.value" :value="option.value" :disabled="option.disabled">{{ option.label }}</option></select><small>{{ supportsMtp ? '模型已识别 MTP，默认 MTP' : '模型未识别 MTP，默认关闭' }}</small></label>
-              <label v-if="mtpEnabled || form.draft_model_id"><span>预测 token 数</span><input v-model.number="form.spec_draft_n_max" type="number" min="1" max="32" /></label>
-              <label v-if="(mtpEnabled || form.draft_model_id) && supportsEngineParameter('spec_draft_p_min')"><span>接受阈值</span><input v-model.number="form.spec_draft_p_min" type="number" min="0" max="1" step="0.01" /><small>推荐 {{ recommendedValue({ key: 'spec_draft_p_min' }) }}</small></label>
-              <label v-if="ngramEnabled"><span>n-gram 匹配长度</span><input v-model.number="form.ngram_mod_n_match" type="number" min="1" max="256" /></label>
+              <label v-if="mtpEnabled || form.draft_model_id" data-field="spec_draft_n_max"><span>预测 token 数</span><input v-model.number="form.spec_draft_n_max" type="number" min="1" max="32" /></label>
+              <label v-if="(mtpEnabled || form.draft_model_id) && supportsEngineParameter('spec_draft_p_min')" data-field="spec_draft_p_min"><span>接受阈值</span><input v-model.number="form.spec_draft_p_min" type="number" min="0" max="1" step="0.01" /><small>推荐 {{ recommendedValue({ key: 'spec_draft_p_min' }) }}</small></label>
+              <label v-if="ngramEnabled" data-field="ngram_mod_n_match"><span>n-gram 匹配长度</span><input v-model.number="form.ngram_mod_n_match" type="number" min="1" max="256" /></label>
             </div>
             <label v-if="draftModels.length || engineSupportsDraft" class="full-field draft-model-field"><span>草稿模型</span><select v-model="form.draft_model_id" :disabled="!draftAvailable || mtpEnabled"><option value="">不使用外置草稿模型</option><option v-for="draft in draftModels" :key="draft.id" :value="draft.id">{{ draft.name }} · {{ draft.size_human }}</option></select><small>{{ mtpEnabled ? '当前使用 MTP；切换到 n-gram 或关闭后可选外置草稿模型' : draftAvailable ? '仅展示当前模型目录或模型族的草稿模型' : '未发现可用草稿模型' }}</small></label>
           </details>
@@ -594,7 +668,7 @@ async function submit() {
             <label><span>空闲休眠 (秒)</span><input v-model.number="form.sleep_idle_seconds" type="number" /></label>
             <template v-if="selectedEngine && engineParameterSchema.length">
               <label v-if="supportsEngineParameter('device')"><span>设备</span><select v-if="engineParameter('device')?.values?.length" v-model="form.device"><option v-for="value in engineParameter('device')?.values" :key="value" :value="value">{{ value }}</option></select><input v-else v-model="form.device" placeholder="Vulkan0" /><small>统一设备参数，按引擎自动填充</small></label>
-              <label v-if="supportsEngineParameter('fit')"><span>Fit 模式</span><select v-model="form.fit"><option value="">默认</option><option value="on">on</option><option value="off">off</option></select></label>
+              <label v-if="supportsEngineParameter('fit')" data-field="fit"><span>Fit 模式</span><select v-model="form.fit"><option value="">默认</option><option value="on">on</option><option value="off">off</option></select></label>
               <label v-if="supportsEngineParameter('cache_reuse')"><span>Cache reuse</span><input v-model.number="form.cache_reuse" type="number" min="0" max="1048576" /></label>
             </template>
           </div>
