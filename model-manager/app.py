@@ -196,6 +196,541 @@ _LLAMA_SPEC_TYPES = (
     "ngram-mod", "ngram-cache",
 )
 
+_ENGINE_PARAMETER_FILE_NAMES = (
+    "deployment-parameters.json",
+    "parameters.json",
+)
+
+# Fields that are safe to carry from an engine parameter file to the public
+# schema.  Values such as binary paths and environment variables are kept in
+# the registry record and are never accepted from a deployment request.
+_PARAMETER_METADATA_FIELDS = (
+    "label", "type", "description", "flag", "false_flag", "env", "group",
+    "common", "managed", "default", "min", "max", "step", "values",
+    "placeholder", "visible_when", "requires", "conflicts", "source",
+    "secret", "deprecated", "load_phase",
+)
+
+# One deployment contract is shared by every llama.cpp engine.  A VERSION.json
+# may override labels/defaults or add a genuinely new flag, but it must not
+# make common controls disappear from the model-manager drawer.
+_COMMON_ENGINE_PARAMETER_DEFINITIONS = (
+    {"key": "ctx_size", "label": "上下文大小", "type": "integer", "flag": "--ctx-size", "min": 4096, "max": 1048576, "default": 131072, "group": "基础"},
+    {"key": "concurrency", "label": "并发数", "type": "integer", "flag": "-np", "min": 1, "max": 32, "default": 1, "group": "基础"},
+    {"key": "batch", "label": "Batch", "type": "integer", "flag": "-b", "min": 1, "max": 65536, "default": 1024, "group": "性能"},
+    {"key": "ubatch", "label": "Ubatch", "type": "integer", "flag": "-ub", "min": 1, "max": 65536, "default": 512, "group": "性能"},
+    {"key": "threads", "label": "CPU 线程", "type": "integer", "flag": "-t", "min": 1, "max": 512, "default": 8, "group": "性能"},
+    {"key": "flash_attn", "label": "Flash Attention", "type": "select", "flag": "--flash-attn", "values": ["on", "off", "auto"], "default": "on", "group": "性能"},
+    {"key": "device", "label": "设备", "type": "select", "flag": "--device", "values": [], "default": "", "group": "设备"},
+    {"key": "fit", "label": "Fit 模式", "type": "select", "flag": "--fit", "values": ["on", "off"], "default": "", "group": "设备"},
+    {"key": "k_cache_type", "label": "K Cache", "type": "select", "flag": "--cache-type-k", "values": [], "default": "q8_0", "group": "KV Cache"},
+    {"key": "v_cache_type", "label": "V Cache", "type": "select", "flag": "--cache-type-v", "values": [], "default": "q8_0", "group": "KV Cache"},
+    {"key": "draft_k_cache_type", "label": "Draft K Cache", "type": "select", "flag": "--cache-type-k-draft", "values": [], "default": "q8_0", "group": "KV Cache"},
+    {"key": "draft_v_cache_type", "label": "Draft V Cache", "type": "select", "flag": "--cache-type-v-draft", "values": [], "default": "q8_0", "group": "KV Cache"},
+    {"key": "kv_unified", "label": "统一 KV Cache", "type": "boolean", "flag": "--kv-unified", "default": False, "group": "KV Cache"},
+    {"key": "cache_reuse", "label": "Cache reuse", "type": "integer", "flag": "--cache-reuse", "min": 0, "max": 1048576, "default": None, "group": "KV Cache"},
+    {"key": "spec_type", "label": "推测解码类型", "type": "multi-select", "flag": "--spec-type", "values": [], "default": "none", "group": "推测解码"},
+    {"key": "spec_draft_n_max", "label": "Draft 预测数", "type": "integer", "flag": "--spec-draft-n-max", "min": 0, "max": 32, "default": 3, "group": "推测解码"},
+    {"key": "spec_draft_p_min", "label": "Draft 接受阈值", "type": "number", "flag": "--spec-draft-p-min", "min": 0, "max": 1, "step": 0.01, "default": None, "group": "推测解码"},
+    {"key": "draft_model", "label": "外置草稿模型", "type": "model", "flag": "--model-draft", "default": "", "group": "推测解码"},
+)
+
+# Keep the fallback useful when an older node has not received the catalog
+# files yet.  New nodes load the same descriptors from common/deployment-
+# parameters.json and can extend this list without a frontend code change.
+_COMMON_ENGINE_PARAMETER_DEFINITIONS += (
+    {"key": "ngl", "label": "GPU 层数", "type": "integer", "flag": "-ngl", "min": 0, "max": 999, "default": 99, "group": "加载", "managed": True},
+    {"key": "threads_batch", "label": "批处理线程", "type": "integer", "flag": "--threads-batch", "min": 1, "max": 512, "default": None, "group": "性能"},
+    {"key": "threads_http", "label": "HTTP 线程", "type": "integer", "flag": "--threads-http", "min": 1, "max": 512, "default": 4, "group": "服务", "managed": True},
+    {"key": "chunked_batch", "label": "连续批处理", "type": "boolean", "flag": "--cont-batching", "default": True, "group": "性能", "managed": True},
+    {"key": "poll_batch", "label": "批处理轮询", "type": "boolean", "flag": "--poll-batch", "default": False, "group": "性能", "managed": True},
+    {"key": "cache_ram", "label": "Cache RAM (MiB)", "type": "integer", "flag": "--cache-ram", "min": 0, "max": 1048576, "default": 8192, "group": "KV Cache", "managed": True},
+    {"key": "sleep_idle_seconds", "label": "空闲休眠（秒）", "type": "integer", "flag": "--sleep-idle-seconds", "min": 0, "max": 86400, "default": 300, "group": "服务", "managed": True},
+    {"key": "n_cpu_moe", "label": "CPU MoE 层数", "type": "integer", "flag": "--n-cpu-moe", "min": 0, "max": 512, "default": 0, "group": "加载", "managed": True},
+    {"key": "split_mode", "label": "多卡切分模式", "type": "select", "flag": "--split-mode", "values": ["none", "layer", "row", "tensor"], "default": "layer", "group": "设备"},
+    {"key": "tensor_split", "label": "Tensor Split", "type": "string", "flag": "--tensor-split", "default": "", "group": "设备", "managed": True},
+    {"key": "main_gpu", "label": "主 GPU", "type": "integer", "flag": "--main-gpu", "min": 0, "max": 64, "default": 0, "group": "设备"},
+    {"key": "fit_target", "label": "Fit 显存余量（MiB）", "type": "string", "flag": "--fit-target", "default": "", "group": "设备"},
+    {"key": "fit_ctx", "label": "Fit 最小上下文", "type": "integer", "flag": "--fit-ctx", "min": 0, "max": 1048576, "default": 4096, "group": "设备"},
+    {"key": "load_mode", "label": "模型加载策略", "type": "select", "flag": "--load-mode", "values": ["none", "mmap", "mlock", "mmap+mlock", "dio"], "default": "mmap", "group": "加载"},
+    {"key": "no_mmap", "label": "禁用 mmap", "type": "boolean", "flag": "--no-mmap", "default": False, "group": "加载", "managed": True},
+    {"key": "use_mlock", "label": "锁定模型内存", "type": "boolean", "flag": "--mlock", "default": False, "group": "加载", "managed": True},
+    {"key": "numa", "label": "NUMA 策略", "type": "select", "flag": "--numa", "values": ["", "distribute", "isolate", "numactl"], "default": "", "group": "加载", "managed": True},
+    {"key": "spec_draft_n_min", "label": "Draft 最小预测数", "type": "integer", "flag": "--spec-draft-n-min", "min": 0, "max": 32, "default": 0, "group": "推测解码"},
+    {"key": "spec_draft_p_split", "label": "Draft 分裂概率", "type": "number", "flag": "--spec-draft-p-split", "min": 0, "max": 1, "step": 0.01, "default": 0.1, "group": "推测解码"},
+    {"key": "draft_device", "label": "Draft 设备", "type": "string", "flag": "--spec-draft-device", "default": "", "group": "推测解码"},
+    {"key": "draft_layers", "label": "Draft GPU 层数", "type": "string", "flag": "--spec-draft-ngl", "default": "auto", "group": "推测解码"},
+    {"key": "draft_threads", "label": "Draft CPU 线程", "type": "integer", "flag": "--spec-draft-threads", "min": 1, "max": 512, "default": None, "group": "推测解码"},
+    {"key": "ngram_mod_n_min", "label": "n-gram 最小长度", "type": "integer", "flag": "--spec-ngram-mod-n-min", "min": 1, "max": 256, "default": 48, "group": "n-gram", "managed": True},
+    {"key": "ngram_mod_n_max", "label": "n-gram 最大长度", "type": "integer", "flag": "--spec-ngram-mod-n-max", "min": 1, "max": 256, "default": 64, "group": "n-gram", "managed": True},
+    {"key": "ngram_mod_n_match", "label": "n-gram 匹配长度", "type": "integer", "flag": "--spec-ngram-mod-n-match", "min": 1, "max": 256, "default": 24, "group": "n-gram", "managed": True},
+    {"key": "ngram_simple_size_n", "label": "n-gram simple N", "type": "integer", "flag": "--spec-ngram-simple-size-n", "min": 1, "max": 256, "default": 16, "group": "n-gram"},
+    {"key": "ngram_simple_size_m", "label": "n-gram simple M", "type": "integer", "flag": "--spec-ngram-simple-size-m", "min": 1, "max": 256, "default": 4, "group": "n-gram"},
+    {"key": "ngram_simple_min_hits", "label": "n-gram simple 最小命中", "type": "integer", "flag": "--spec-ngram-simple-min-hits", "min": 1, "max": 256, "default": 1, "group": "n-gram"},
+    {"key": "ngram_map_k_size_n", "label": "map-k N", "type": "integer", "flag": "--spec-ngram-map-k-size-n", "min": 1, "max": 256, "default": 16, "group": "n-gram"},
+    {"key": "ngram_map_k_size_m", "label": "map-k M", "type": "integer", "flag": "--spec-ngram-map-k-size-m", "min": 1, "max": 256, "default": 4, "group": "n-gram"},
+    {"key": "ngram_map_k_min_hits", "label": "map-k 最小命中", "type": "integer", "flag": "--spec-ngram-map-k-min-hits", "min": 1, "max": 256, "default": 1, "group": "n-gram"},
+    {"key": "ngram_map_k4v_size_n", "label": "map-k4v N", "type": "integer", "flag": "--spec-ngram-map-k4v-size-n", "min": 1, "max": 256, "default": 16, "group": "n-gram"},
+    {"key": "ngram_map_k4v_size_m", "label": "map-k4v M", "type": "integer", "flag": "--spec-ngram-map-k4v-size-m", "min": 1, "max": 256, "default": 4, "group": "n-gram"},
+    {"key": "ngram_map_k4v_min_hits", "label": "map-k4v 最小命中", "type": "integer", "flag": "--spec-ngram-map-k4v-min-hits", "min": 1, "max": 256, "default": 1, "group": "n-gram"},
+    {"key": "mmproj", "label": "视觉投影组件", "type": "artifact", "flag": "--mmproj", "default": False, "group": "多模态", "managed": True},
+    {"key": "mmproj_offload", "label": "视觉组件 GPU offload", "type": "boolean", "flag": "--mmproj-offload", "false_flag": "--no-mmproj-offload", "default": True, "group": "多模态"},
+    {"key": "reasoning", "label": "Reasoning", "type": "select", "flag": "--reasoning", "values": ["on", "off", "auto"], "default": "auto", "group": "生成", "managed": True},
+    {"key": "reasoning_format", "label": "Reasoning 格式", "type": "select", "flag": "--reasoning-format", "values": ["auto", "none", "deepseek", "deepseek-legacy"], "default": "auto", "group": "生成"},
+    {"key": "reasoning_budget", "label": "Reasoning 预算", "type": "integer", "flag": "--reasoning-budget", "min": -1, "max": 1048576, "default": -1, "group": "生成"},
+    {"key": "reasoning_preserve", "label": "保留 Reasoning 轨迹", "type": "boolean", "flag": "--reasoning-preserve", "false_flag": "--no-reasoning-preserve", "default": False, "group": "生成"},
+    {"key": "temp", "label": "Temperature", "type": "number", "flag": "--temp", "min": 0, "max": 5, "step": 0.01, "default": 0.7, "group": "生成", "managed": True},
+    {"key": "metrics", "label": "Metrics", "type": "boolean", "flag": "--metrics", "default": True, "group": "服务", "managed": True},
+    {"key": "ui", "label": "内置 Web UI", "type": "boolean", "flag": "--ui", "default": False, "group": "服务", "managed": True},
+)
+
+_COMMON_ENGINE_PARAMETER_ALIASES = {
+    "ctx_size": ("--ctx-size",),
+    "concurrency": ("-np",),
+    "batch": ("-b", "--batch-size"),
+    "ubatch": ("-ub", "--ubatch-size"),
+    "threads": ("-t",),
+    "flash_attn": ("--flash-attn",),
+    "device": ("--device",),
+    "fit": ("--fit",),
+    "k_cache_type": ("--cache-type-k",),
+    "v_cache_type": ("--cache-type-v",),
+    "draft_k_cache_type": ("--cache-type-k-draft", "--spec-draft-type-k"),
+    "draft_v_cache_type": ("--cache-type-v-draft", "--spec-draft-type-v"),
+    "kv_unified": ("--kv-unified",),
+    "cache_reuse": ("--cache-reuse",),
+    "spec_type": ("--spec-type",),
+    "spec_draft_n_max": ("--spec-draft-n-max",),
+    "spec_draft_p_min": ("--spec-draft-p-min", "--draft-p-min"),
+    "draft_model": ("--model-draft", "--spec-draft-model"),
+}
+_COMMON_ENGINE_PARAMETER_ALIASES.update({
+    "ngl": ("-ngl", "--gpu-layers", "--n-gpu-layers"),
+    "threads_batch": ("-tb", "--threads-batch"),
+    "threads_http": ("--threads-http",),
+    "chunked_batch": ("-cb", "--cont-batching"),
+    "poll_batch": ("--poll-batch",),
+    "cache_ram": ("--cache-ram",),
+    "sleep_idle_seconds": ("--sleep-idle-seconds",),
+    "n_cpu_moe": ("-ncmoe", "--n-cpu-moe"),
+    "split_mode": ("-sm", "--split-mode"),
+    "tensor_split": ("-ts", "--tensor-split"),
+    "main_gpu": ("-mg", "--main-gpu"),
+    "fit_target": ("-fitt", "--fit-target"),
+    "fit_ctx": ("-fitc", "--fit-ctx"),
+    "load_mode": ("-lm", "--load-mode"),
+    "no_mmap": ("--no-mmap",),
+    "use_mlock": ("--mlock",),
+    "numa": ("--numa",),
+    "spec_draft_n_min": ("--spec-draft-n-min",),
+    "spec_draft_p_split": ("--spec-draft-p-split", "--draft-p-split"),
+    "draft_device": ("--spec-draft-device", "--device-draft"),
+    "draft_layers": ("--spec-draft-ngl", "--gpu-layers-draft", "--n-gpu-layers-draft"),
+    "draft_threads": ("--spec-draft-threads", "--threads-draft"),
+    "ngram_mod_n_min": ("--spec-ngram-mod-n-min",),
+    "ngram_mod_n_max": ("--spec-ngram-mod-n-max",),
+    "ngram_mod_n_match": ("--spec-ngram-mod-n-match",),
+    "ngram_simple_size_n": ("--spec-ngram-simple-size-n",),
+    "ngram_simple_size_m": ("--spec-ngram-simple-size-m",),
+    "ngram_simple_min_hits": ("--spec-ngram-simple-min-hits",),
+    "ngram_map_k_size_n": ("--spec-ngram-map-k-size-n",),
+    "ngram_map_k_size_m": ("--spec-ngram-map-k-size-m",),
+    "ngram_map_k_min_hits": ("--spec-ngram-map-k-min-hits",),
+    "ngram_map_k4v_size_n": ("--spec-ngram-map-k4v-size-n",),
+    "ngram_map_k4v_size_m": ("--spec-ngram-map-k4v-size-m",),
+    "ngram_map_k4v_min_hits": ("--spec-ngram-map-k4v-min-hits",),
+    "mmproj": ("-mm", "--mmproj"),
+    "mmproj_offload": ("--mmproj-offload",),
+    "reasoning": ("-rea", "--reasoning"),
+    "reasoning_format": ("--reasoning-format",),
+    "reasoning_budget": ("--reasoning-budget",),
+    "reasoning_preserve": ("--reasoning-preserve",),
+    "temp": ("--temp",),
+    "metrics": ("--metrics",),
+    "ui": ("--ui",),
+})
+
+
+def _merge_parameter_lists(base: list[Any], override: list[Any]) -> list[dict[str, Any]]:
+    """Merge parameter descriptors by key while preserving catalog order."""
+    merged: list[dict[str, Any]] = []
+    positions: dict[str, int] = {}
+    for item in [*base, *override]:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "").strip()
+        if not key:
+            continue
+        value = dict(item)
+        if key in positions:
+            merged[positions[key]].update(value)
+        else:
+            positions[key] = len(merged)
+            merged.append(value)
+    return merged
+
+
+def _merge_engine_parameter_config(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Merge a common parameter catalog with one engine's overrides."""
+    result = dict(base)
+    for key, value in override.items():
+        if key in {"parameters", "parameter_schema"}:
+            continue
+        if key == "profiles" and isinstance(value, dict) and isinstance(result.get(key), dict):
+            profiles = dict(result[key])
+            for profile_id, profile in value.items():
+                if isinstance(profile, dict) and isinstance(profiles.get(profile_id), dict):
+                    merged_profile = dict(profiles[profile_id])
+                    merged_profile.update(profile)
+                    if isinstance(profiles[profile_id].get("parameters"), dict) and isinstance(profile.get("parameters"), dict):
+                        merged_profile["parameters"] = {
+                            **profiles[profile_id]["parameters"],
+                            **profile["parameters"],
+                        }
+                    profiles[profile_id] = merged_profile
+                else:
+                    profiles[profile_id] = profile
+            result[key] = profiles
+            continue
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            nested = dict(result[key])
+            nested.update(value)
+            result[key] = nested
+        else:
+            result[key] = value
+    base_parameters = base.get("parameters") or base.get("parameter_schema") or []
+    override_parameters = override.get("parameters") or override.get("parameter_schema") or []
+    result["parameters"] = _merge_parameter_lists(
+        base_parameters if isinstance(base_parameters, list) else [],
+        override_parameters if isinstance(override_parameters, list) else [],
+    )
+    return result
+
+
+def _load_engine_parameter_config(version_file: str, raw_engine: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """Load the optional parameter file beside VERSION.json.
+
+    An engine directory owns its deployment defaults and capability notes.  A
+    small ``extends`` file lets all engines share the same llama.cpp catalog
+    while keeping engine-specific profiles, load strategy and environment
+    settings next to the binary.  Missing or invalid files are intentionally
+    non-fatal so old VERSION.json deployments keep working.
+    """
+    registry_dir = Path(version_file).resolve().parent
+    candidates: list[Path] = []
+    configured = raw_engine.get("parameter_file")
+    if isinstance(configured, str) and configured.strip():
+        candidates.append((registry_dir / configured).resolve())
+    candidates.extend((registry_dir / name).resolve() for name in _ENGINE_PARAMETER_FILE_NAMES)
+    parameter_file = next((path for path in candidates if path.is_file()), None)
+    if parameter_file is None:
+        return {}, ""
+
+    engines_root = Path(_ENGINES_DIR).resolve()
+    loaded: set[Path] = set()
+
+    def read_file(path: Path) -> dict[str, Any]:
+        path = path.resolve()
+        if path in loaded:
+            raise ValueError(f"循环 extends: {path}")
+        try:
+            path.relative_to(engines_root)
+        except ValueError:
+            raise ValueError(f"参数文件超出引擎目录: {path}")
+        loaded.add(path)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"无法读取参数文件 {path}: {exc}")
+        if not isinstance(payload, dict):
+            raise ValueError(f"参数文件必须是 JSON 对象: {path}")
+        parent: dict[str, Any] = {}
+        extends = payload.get("extends")
+        if isinstance(extends, str) and extends.strip():
+            parent = read_file((path.parent / extends).resolve())
+        current = dict(payload)
+        current.pop("extends", None)
+        return _merge_engine_parameter_config(parent, current)
+
+    try:
+        return read_file(parameter_file), str(parameter_file)
+    except ValueError as exc:
+        print(f"[WARN] Failed to load engine parameter file {parameter_file}: {exc}")
+        return {}, str(parameter_file)
+
+
+def _engine_parameter_definitions(engine: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the code fallback plus descriptors supplied by the registry."""
+    definitions = [dict(item) for item in _COMMON_ENGINE_PARAMETER_DEFINITIONS]
+    configured = engine.get("_parameter_file_parameters")
+    if isinstance(configured, list):
+        definitions = _merge_parameter_lists(definitions, configured)
+    return definitions
+
+
+def _normalize_engine_parameter_metadata(
+    engine: dict[str, Any], probed: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], list[str], dict[str, Any], list[str], dict[str, Any]]:
+    """Build one common deployment schema with per-engine recommendations.
+
+    ``parameter_schema`` remains accepted as a registry override for
+    compatibility. The returned schema always starts with the same common
+    controls, then appends genuinely engine-specific keys. ``recommended``
+    and ``differences`` describe tuning choices, not a second incompatible
+    request format.
+    """
+    probed = probed or {}
+    definitions = _engine_parameter_definitions(engine)
+    raw_schema = engine.get("parameter_schema")
+    explicit: dict[str, dict[str, Any]] = {}
+    if isinstance(raw_schema, list):
+        for item in raw_schema:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key") or "").strip()
+            if key:
+                explicit[key] = dict(item)
+
+    notes: list[str] = []
+    raw_notes = engine.get("parameter_notes")
+    if isinstance(raw_notes, list):
+        notes = [str(note).strip() for note in raw_notes if str(note).strip()]
+    elif isinstance(raw_notes, str) and raw_notes.strip():
+        notes = [raw_notes.strip()]
+
+    recommended: dict[str, Any] = {}
+    raw_recommended = engine.get("recommended_params")
+    if isinstance(raw_recommended, dict):
+        recommended = dict(raw_recommended)
+    backend = str(engine.get("backend") or "").lower()
+    if "device" not in recommended:
+        if backend == "rocm":
+            recommended["device"] = "ROCm0"
+        elif backend == "vulkan":
+            recommended["device"] = "Vulkan0"
+    if "spec_draft_n_max" not in recommended and engine.get("version_params", {}).get("spec_draft_n_max") is not None:
+        recommended["spec_draft_n_max"] = engine.get("version_params", {}).get("spec_draft_n_max")
+
+    support = probed.get("parameter_support") if isinstance(probed.get("parameter_support"), dict) else {}
+    cache_values = probed.get("cache_types") if isinstance(probed.get("cache_types"), list) else list(_LLAMA_CACHE_TYPES)
+    draft_cache_values = probed.get("draft_cache_types") if isinstance(probed.get("draft_cache_types"), list) else cache_values
+    spec_values = probed.get("spec_types") if isinstance(probed.get("spec_types"), list) else list(_LLAMA_SPEC_TYPES)
+    common_keys = {definition["key"] for definition in definitions}
+    schema: list[dict[str, Any]] = []
+    differences: dict[str, Any] = {}
+    for definition in definitions:
+        key = definition["key"]
+        item = dict(definition)
+        override = explicit.get(key, {})
+        for field in _PARAMETER_METADATA_FIELDS:
+            if field in override:
+                item[field] = override[field]
+        if key in {"k_cache_type", "v_cache_type"}:
+            item["values"] = list(cache_values)
+        elif key in {"draft_k_cache_type", "draft_v_cache_type"}:
+            item["values"] = list(draft_cache_values)
+        elif key == "spec_type":
+            item["values"] = list(spec_values)
+        elif key == "device":
+            item["values"] = list(probed.get("device_values") or override.get("values") or [])
+        configured_supported = override.get("supported", definition.get("supported"))
+        if configured_supported is True:
+            supported = True
+        elif configured_supported is False:
+            supported = False
+        else:
+            supported = bool(key in explicit or support.get(key, False))
+        item["supported"] = supported
+        item["common"] = bool(item.get("common", definition.get("common", True)))
+        item["recommended"] = recommended.get(key, item.get("default"))
+        if key in recommended and recommended[key] != item.get("default"):
+            differences[key] = {
+                "recommended": recommended[key],
+                "default": item.get("default"),
+                "reason": str(override.get("description") or "该引擎的实测推荐值"),
+            }
+        elif key in explicit and "default" in override and override.get("default") != definition.get("default"):
+            differences[key] = {
+                "recommended": override.get("default"),
+                "default": definition.get("default"),
+                "reason": str(override.get("description") or "引擎注册表推荐值"),
+            }
+        schema.append(item)
+
+    exclusive: list[str] = [
+        str(item.get("key"))
+        for item in schema
+        if item.get("common") is False and str(item.get("key") or "").strip()
+    ]
+    for key, override in explicit.items():
+        if key in common_keys:
+            continue
+        item = {"key": key, "common": bool(override.get("common", False)), "supported": True}
+        for field in _PARAMETER_METADATA_FIELDS:
+            if field in override:
+                item[field] = override[field]
+        item["recommended"] = recommended.get(key, item.get("default"))
+        schema.append(item)
+        exclusive.append(key)
+    raw_exclusive = engine.get("exclusive_parameters")
+    if isinstance(raw_exclusive, list):
+        exclusive = list(dict.fromkeys([*exclusive, *[str(key) for key in raw_exclusive if str(key).strip()]]))
+    raw_differences = engine.get("parameter_differences")
+    if isinstance(raw_differences, dict):
+        differences.update(raw_differences)
+    return schema, notes, recommended, exclusive, differences
+
+
+def _engine_supports_parameter(engine: dict[str, Any] | None, key: str) -> bool:
+    if not engine:
+        return False
+    schema = engine.get("deployment_parameters") or engine.get("parameter_schema")
+    if not isinstance(schema, list):
+        return False
+    return any(
+        isinstance(item, dict)
+        and str(item.get("key") or "") == key
+        and item.get("supported", True) is not False
+        for item in schema
+    )
+
+
+_LEGACY_MANAGED_PARAMETER_KEYS = {
+    "ctx_size", "ngl", "concurrency", "batch", "ubatch", "threads",
+    "flash_attn", "device", "fit", "k_cache_type", "v_cache_type",
+    "draft_k_cache_type", "draft_v_cache_type", "kv_unified", "cache_reuse",
+    "spec_type", "spec_draft_n_max", "spec_draft_p_min", "draft_model",
+    "threads_http", "chunked_batch", "temp", "ui", "mmproj", "cache_ram",
+    "sleep_idle_seconds", "no_mmap", "use_mlock", "numa", "poll_batch",
+    "n_cpu_moe", "tensor_split", "ngram_mod_n_min", "ngram_mod_n_max",
+    "ngram_mod_n_match", "reasoning", "metrics",
+}
+
+
+def _engine_parameter_map(engine: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    if not engine:
+        return {}
+    return {
+        str(item.get("key")): item
+        for item in (engine.get("deployment_parameters") or engine.get("parameter_schema") or [])
+        if isinstance(item, dict) and str(item.get("key") or "").strip()
+    }
+
+
+def _parameter_is_managed(item: dict[str, Any]) -> bool:
+    return bool(item.get("managed") or str(item.get("key") or "") in _LEGACY_MANAGED_PARAMETER_KEYS)
+
+
+def _apply_canonical_parameter_payload(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Accept the v2 ``parameters`` map while retaining the flat API.
+
+    Flat keys win when both forms are present, which keeps old clients and
+    browser retries deterministic during the migration.
+    """
+    canonical = data.get("parameters")
+    if not isinstance(canonical, dict):
+        canonical = data.get("parameter_values")
+    if not isinstance(canonical, dict):
+        canonical = {}
+    merged = dict(data)
+    for key, value in canonical.items():
+        if str(key).strip() and key not in merged:
+            merged[key] = value
+    return merged, {str(key): value for key, value in canonical.items() if str(key).strip()}
+
+
+class _JsonBodyRequest:
+    """Small internal adapter for routing engine switches through deploy_model."""
+
+    def __init__(self, payload: dict[str, Any]):
+        self.payload = payload
+
+    async def json(self) -> dict[str, Any]:
+        return self.payload
+
+
+def _validate_canonical_parameters(engine: dict[str, Any], values: dict[str, Any]) -> None:
+    schema = _engine_parameter_map(engine)
+    for key, value in values.items():
+        item = schema.get(key)
+        if item is None:
+            raise HTTPException(400, f"所选引擎参数未注册: {key}")
+        if item.get("supported") is False:
+            raise HTTPException(400, f"所选引擎不支持参数: {key}")
+        if value in (None, ""):
+            continue
+        values_allowed = item.get("values")
+        if isinstance(values_allowed, list) and values_allowed and item.get("type") in {"select", "multi-select"}:
+            candidates = value if isinstance(value, list) else [value]
+            invalid = [str(entry) for entry in candidates if str(entry) not in {str(v) for v in values_allowed}]
+            if invalid:
+                raise HTTPException(400, f"参数 {key} 不受支持: {', '.join(invalid)}")
+        if item.get("type") == "integer":
+            _bounded_int(value, key, int(item.get("min", -2147483648)), int(item.get("max", 2147483647)))
+        elif item.get("type") == "number":
+            _bounded_float(value, key, float(item.get("min", -1e12)), float(item.get("max", 1e12)))
+        elif item.get("type") == "boolean" and not isinstance(value, (bool, int, str)):
+            raise HTTPException(400, f"参数 {key} 必须是布尔值")
+
+
+def _generic_parameter_flags(
+    engine: dict[str, Any] | None,
+    values: dict[str, Any],
+    *,
+    skip: set[str] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Render registry-declared non-legacy flags and environment variables."""
+    parameter_map = _engine_parameter_map(engine)
+    skipped = skip or set()
+    args: list[str] = []
+    exports: list[str] = []
+    for key, value in values.items():
+        item = parameter_map.get(key)
+        if not item or item.get("supported") is False or _parameter_is_managed(item) or key in skipped:
+            continue
+        if value in (None, ""):
+            continue
+        value_type = str(item.get("type") or "string")
+        if value_type == "boolean":
+            enabled = value is True or str(value).lower() in {"1", "true", "on", "yes"}
+            flag = str(item.get("flag") or "").strip()
+            false_flag = str(item.get("false_flag") or "").strip()
+            if item.get("env"):
+                exports.append(f"export {item['env']}={'1' if enabled else '0'}")
+            elif enabled and flag:
+                args.append(flag)
+            elif not enabled and false_flag and item.get("default") is True:
+                args.append(false_flag)
+            continue
+        if isinstance(value, list):
+            rendered = ",".join(str(entry) for entry in value)
+        else:
+            rendered = str(value)
+        flag = str(item.get("flag") or "").strip()
+        if item.get("env"):
+            exports.append(f"export {item['env']}={shlex.quote(rendered)}")
+        elif flag:
+            args.extend([flag, shlex.quote(rendered)])
+    return args, exports
+
+
+def _engine_environment_exports(engine: dict[str, Any] | None) -> list[str]:
+    """Render static, non-secret environment defaults from an engine file."""
+    if not engine:
+        return []
+    raw = engine.get("engine_environment")
+    if not isinstance(raw, dict):
+        return []
+    defaults = raw.get("defaults") if isinstance(raw.get("defaults"), dict) else raw
+    exports: list[str] = []
+    for key, value in defaults.items():
+        name = str(key).strip()
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]{1,127}", name) or "KEY" in name or "TOKEN" in name or "PASSWORD" in name:
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            exports.append(f"export {name}={shlex.quote(str(value).lower() if isinstance(value, bool) else str(value))}")
+    return exports
+
 
 def _help_allowed_values(help_text: str, flag: str) -> list[str]:
     """Extract an argparse ``allowed values`` line following one exact flag."""
@@ -261,10 +796,34 @@ def _probe_engine_capabilities(binary_path: str) -> dict[str, Any]:
         cache_types = _help_allowed_values(help_text, "--cache-type-k")
         draft_cache_types = _help_allowed_values(help_text, "--cache-type-k-draft")
         spec_types = _help_spec_types(help_text)
+        parameter_support = {}
+        for parameter_key, aliases in _COMMON_ENGINE_PARAMETER_ALIASES.items():
+            parameter_support[parameter_key] = any(
+                re.search(rf"(?<![A-Za-z0-9_-]){re.escape(alias)}(?:\s|,|$)", help_text)
+                for alias in aliases
+            )
+        device_values: list[str] = []
+        try:
+            device_result = subprocess.run(
+                [str(binary), "--list-devices"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            device_values = list(dict.fromkeys(
+                match.group(1)
+                for match in re.finditer(r"^\s*([A-Za-z][A-Za-z0-9_-]*\d+):", device_result.stdout or "", re.MULTILINE)
+            ))
+        except (OSError, subprocess.SubprocessError):
+            device_values = []
         capabilities = {
             "cache_types": cache_types or list(_LLAMA_CACHE_TYPES),
             "draft_cache_types": draft_cache_types or cache_types or list(_LLAMA_CACHE_TYPES),
             "spec_types": spec_types or list(_LLAMA_SPEC_TYPES),
+            "parameter_support": parameter_support,
+            "device_values": device_values,
             "supports_mtp": bool(re.search(r"\bdraft-mtp\b", help_text, re.IGNORECASE)),
             "supports_draft_model": bool(re.search(r"(?:--model-draft|--spec-draft-model|\s-md[ ,])", help_text, re.IGNORECASE)),
             "supports_ngram": bool(re.search(r"\bngram-(?:simple|map-k|mod|cache)\b", help_text, re.IGNORECASE)),
@@ -286,15 +845,53 @@ def _normalize_engine_record(eng, version_file):
     if not key or not re.fullmatch(r"[A-Za-z0-9._-]+", key):
         raise ValueError(f"invalid engine key: {raw_key!r}")
 
-    normalized = dict(eng)
+    parameter_config, parameter_file = _load_engine_parameter_config(version_file, eng)
+    effective = dict(parameter_config)
+    effective.update(eng)
+    file_parameters = parameter_config.get("parameters") if isinstance(parameter_config, dict) else None
+    if isinstance(file_parameters, list):
+        effective["_parameter_file_parameters"] = file_parameters
+    # VERSION.json remains the highest-priority compatibility override for
+    # older nodes that already declare a small parameter_schema.
+    if isinstance(eng.get("parameter_schema"), list):
+        effective["parameter_schema"] = list(eng["parameter_schema"])
+    profiles = parameter_config.get("profiles") if isinstance(parameter_config, dict) else {}
+    profile_defaults: dict[str, Any] = {}
+    if isinstance(profiles, dict):
+        default_profile = profiles.get("default")
+        if isinstance(default_profile, dict):
+            candidate = default_profile.get("parameters") or default_profile.get("values")
+            if isinstance(candidate, dict):
+                profile_defaults.update(candidate)
+    load_defaults = parameter_config.get("load_strategy", {}).get("default", {}) if isinstance(parameter_config.get("load_strategy"), dict) else {}
+    if isinstance(load_defaults, dict):
+        for default_key in ("load_mode", "fit", "kv_unified", "device"):
+            if default_key in load_defaults and default_key not in profile_defaults:
+                profile_defaults[default_key] = load_defaults[default_key]
+        if "kv_cache" in load_defaults:
+            profile_defaults.setdefault("k_cache_type", load_defaults["kv_cache"])
+            profile_defaults.setdefault("v_cache_type", load_defaults["kv_cache"])
+    config_recommended = parameter_config.get("recommended_params") if isinstance(parameter_config, dict) else {}
+    version_recommended = eng.get("recommended_params")
+    recommended: dict[str, Any] = {}
+    for candidate in (profile_defaults, config_recommended, version_recommended):
+        if isinstance(candidate, dict):
+            recommended.update(candidate)
+    if recommended:
+        effective["recommended_params"] = recommended
+    if parameter_file:
+        effective["_parameter_config_path"] = parameter_file
+
+    normalized = dict(effective)
     normalized["key"] = key
-    normalized["name"] = str(eng.get("name") or key)
-    normalized["type"] = str(eng.get("type") or "llama")
-    normalized["features"] = list(eng.get("features") or [])
-    normalized["version_params"] = dict(eng.get("version_params") or {})
+    normalized["name"] = str(effective.get("name") or key)
+    normalized["type"] = str(effective.get("type") or effective.get("runtime_type") or "llama")
+    normalized["features"] = list(effective.get("features") or [])
+    normalized["version_params"] = dict(effective.get("version_params") or {})
     normalized["_dir"] = registry_dir
 
-    binary_path = str(eng.get("binary_path") or "").strip()
+    binary = effective.get("binary") if isinstance(effective.get("binary"), dict) else {}
+    binary_path = str(effective.get("binary_path") or binary.get("path") or "").strip()
     if not binary_path:
         candidates = (
             os.path.join(_ENGINES_DIR, "llama", f"build-{key}", "bin", "llama-server"),
@@ -303,35 +900,47 @@ def _normalize_engine_record(eng, version_file):
         )
         binary_path = next((path for path in candidates if os.path.isfile(path)), "")
     normalized["binary_path"] = binary_path
-    explicit_mtp = "supports_mtp" in eng or "spec_draft_n_max" in normalized["version_params"]
     probed = _probe_engine_capabilities(binary_path)
+    parameter_schema, parameter_notes, recommended_params, exclusive_parameters, parameter_differences = _normalize_engine_parameter_metadata(effective, probed)
+    normalized["parameter_schema"] = parameter_schema
+    normalized["deployment_parameters"] = parameter_schema
+    normalized["parameter_notes"] = parameter_notes
+    normalized["recommended_params"] = recommended_params
+    normalized["exclusive_parameters"] = exclusive_parameters
+    normalized["parameter_differences"] = parameter_differences
     supports_mtp = bool(
-        eng.get("supports_mtp")
-        if "supports_mtp" in eng
+        effective.get("supports_mtp")
+        if "supports_mtp" in effective
         else normalized["version_params"].get("spec_draft_n_max", False)
         if "spec_draft_n_max" in normalized["version_params"]
         else probed.get("supports_mtp", False)
     )
     normalized["supports_mtp"] = supports_mtp
     normalized["cache_types"] = list(
-        eng.get("cache_types") or probed.get("cache_types") or _LLAMA_CACHE_TYPES
+        effective.get("cache_types") or probed.get("cache_types") or _LLAMA_CACHE_TYPES
     )
     normalized["draft_cache_types"] = list(
-        eng.get("draft_cache_types") or probed.get("draft_cache_types") or normalized["cache_types"]
+        effective.get("draft_cache_types") or probed.get("draft_cache_types") or normalized["cache_types"]
     )
     normalized["spec_types"] = list(
-        eng.get("spec_types") or probed.get("spec_types") or _LLAMA_SPEC_TYPES
+        effective.get("spec_types") or probed.get("spec_types") or _LLAMA_SPEC_TYPES
     )
     normalized["supports_draft_model"] = bool(
-        eng.get("supports_draft_model")
-        if "supports_draft_model" in eng
+        effective.get("supports_draft_model")
+        if "supports_draft_model" in effective
         else probed.get("supports_draft_model", False)
     )
     normalized["supports_ngram"] = bool(
-        eng.get("supports_ngram")
-        if "supports_ngram" in eng
+        effective.get("supports_ngram")
+        if "supports_ngram" in effective
         else probed.get("supports_ngram", True)
     )
+    normalized["parameter_file"] = parameter_file
+    normalized["parameter_config_version"] = parameter_config.get("schema_version") if parameter_config else None
+    normalized["profiles"] = profiles if isinstance(profiles, dict) else {}
+    normalized["load_strategy"] = parameter_config.get("load_strategy", {}) if isinstance(parameter_config, dict) else {}
+    normalized["engine_environment"] = parameter_config.get("environment", {}) if isinstance(parameter_config, dict) else {}
+    normalized["parameter_config_notes"] = parameter_config.get("notes", []) if isinstance(parameter_config, dict) else []
     if supports_mtp:
         normalized["features"] = list(dict.fromkeys([*normalized["features"], "MTP"]))
         normalized["version_params"].setdefault("spec_draft_n_max", 3)
@@ -1026,6 +1635,12 @@ def _get_running_cmdline_config_scan():
             config["ngram_mod_n_match"] = int(_arg("--spec-ngram-mod-n-match") or 0) or None
             config["cache_ram"] = int(_arg("--cache-ram") or 2048)
             config["sleep_idle_seconds"] = int(_arg("--sleep-idle-seconds") or 300)
+            config["device"] = _arg("--device") or ""
+            config["fit"] = _arg("--fit") or ""
+            config["kv_unified"] = _flag("--kv-unified")
+            config["cache_reuse"] = int(_arg("--cache-reuse") or 0) or None
+            spec_p_min = _arg("--spec-draft-p-min")
+            config["spec_draft_p_min"] = float(spec_p_min) if spec_p_min is not None else None
             bin_path = cmdline[0] if cmdline else ""
             config["binary_path"] = bin_path
             config["llama_version"] = _engine_key_from_binary(bin_path) or _get_active_engine() or "unknown"
@@ -1112,11 +1727,20 @@ def parse_script_config(content=""):
         config["cache_ram"] = int(m_cache_ram.group(1)) if m_cache_ram else 2048
         m_sleep = re.search(r"--sleep-idle-seconds\s+(\d+)", content)
         config["sleep_idle_seconds"] = int(m_sleep.group(1)) if m_sleep else 300
+        m_device = re.search(r"--device\s+(\S+)", content)
+        config["device"] = m_device.group(1) if m_device else ""
+        m_fit = re.search(r"--fit\s+(on|off)", content)
+        config["fit"] = m_fit.group(1) if m_fit else ""
+        config["kv_unified"] = bool(re.search(r"--kv-unified\b", content))
+        m_reuse = re.search(r"--cache-reuse\s+(\d+)", content)
+        config["cache_reuse"] = int(m_reuse.group(1)) if m_reuse else None
+        m_p_min = re.search(r"--spec-draft-p-min\s+(\S+)", content)
+        config["spec_draft_p_min"] = float(m_p_min.group(1)) if m_p_min else None
         return config
     # 优先级3: 回退到 env 文件
     env_cfg = _read_env_config()
     if not env_cfg:
-        return {"ngl": 99, "ctx_size": 131072, "concurrency": 2, "mmproj": False, "mmproj_file": None, "model": "", "draft_model": "", "draft_model_path": "", "k_cache_type": "q8_0", "v_cache_type": "q8_0", "batch": 1024, "ubatch": 512, "flash_attn": True, "chunked_batch": True, "threads": 8, "threads_http": 4, "temp": 0.7, "reasoning": "off", "host": "0.0.0.0", "port": 8080, "kv_offload": "off", "draft_k_cache_type": "q8_0", "draft_v_cache_type": "q8_0", "n_cpu_moe": 0, "tensor_split": None, "gpu": "all", "cache_ram": 2048, "sleep_idle_seconds": 300}
+        return {"ngl": 99, "ctx_size": 131072, "concurrency": 2, "mmproj": False, "mmproj_file": None, "model": "", "draft_model": "", "draft_model_path": "", "k_cache_type": "q8_0", "v_cache_type": "q8_0", "batch": 1024, "ubatch": 512, "flash_attn": True, "chunked_batch": True, "threads": 8, "threads_http": 4, "temp": 0.7, "reasoning": "off", "host": "0.0.0.0", "port": 8080, "kv_offload": "off", "draft_k_cache_type": "q8_0", "draft_v_cache_type": "q8_0", "n_cpu_moe": 0, "tensor_split": None, "gpu": "all", "cache_ram": 2048, "sleep_idle_seconds": 300, "device": "", "fit": "", "kv_unified": False, "cache_reuse": None, "spec_draft_p_min": None}
     return {
         "ngl": int(env_cfg.get("N_GPU_LAYERS", _get_default_ngl())),
         "ctx_size": int(env_cfg.get("CTX_SIZE", 131072)),
@@ -1183,7 +1807,7 @@ def write_start_script(script_content: str):
 
 
 
-def update_persist_state(engine="llama", binary="", model="", args=""):
+def update_persist_state(engine="llama", binary="", model="", args="", parameters=None, profile_id="default"):
     """更新持久化状态文件"""
     safe_args = re.sub(
         r"(--api-key\s+)(?:'[^']*'|\"[^\"]*\"|\S+)",
@@ -1194,7 +1818,9 @@ def update_persist_state(engine="llama", binary="", model="", args=""):
         "engine": engine,
         "binary": binary,
         "model": model,
-        "args": safe_args
+        "args": safe_args,
+        "profile_id": profile_id or "default",
+        "parameters": parameters if isinstance(parameters, dict) else {},
     }
     config_path = "/data/inference-hub/state/persist_config.json"
     _atomic_write_text(config_path, json.dumps(config, indent=2) + "\n")
@@ -1878,6 +2504,19 @@ async def list_models(force: bool = False):
     _, observed_config = _runtime_cache.peek()
     content = await asyncio.to_thread(read_start_script)
     current_config = observed_config or (parse_script_config(content) if content else {})
+    persisted_config: dict[str, Any] = {}
+    try:
+        persisted_path = Path("/data/inference-hub/state/persist_config.json")
+        if persisted_path.is_file():
+            raw_persisted = json.loads(persisted_path.read_text(encoding="utf-8"))
+            if isinstance(raw_persisted, dict):
+                persisted_config = raw_persisted
+    except (OSError, json.JSONDecodeError):
+        persisted_config = {}
+    if persisted_config:
+        current_config = dict(current_config)
+        current_config.setdefault("profile_id", persisted_config.get("profile_id", "default"))
+        current_config.setdefault("parameters", persisted_config.get("parameters", {}))
     running = observed_config is not None
     current_model_id = ""
     model_path = current_config.get("model_path", "")
@@ -1921,6 +2560,7 @@ async def list_models(force: bool = False):
             "k_cache_type": current_config.get("k_cache_type", "q8_0"),
             "v_cache_type": current_config.get("v_cache_type", "q8_0"),
             "llama_version": current_config.get("llama_version") or _get_active_engine() or "unknown",
+            "profile_id": current_config.get("profile_id", persisted_config.get("profile_id", "default")),
             "draft_k_cache_type": current_config.get("draft_k_cache_type") if _supports_mtp(current_config.get("llama_version") or _get_active_engine() or "unknown") else None,
             "draft_v_cache_type": current_config.get("draft_v_cache_type") if _supports_mtp(current_config.get("llama_version") or _get_active_engine() or "unknown") else None,
             "batch": current_config.get("batch", 1024),
@@ -1945,6 +2585,12 @@ async def list_models(force: bool = False):
             "ngram_mod_n_match": current_config.get("ngram_mod_n_match"),
             "cache_ram": current_config.get("cache_ram", 2048),
             "sleep_idle_seconds": current_config.get("sleep_idle_seconds", 300),
+            "device": current_config.get("device", ""),
+            "fit": current_config.get("fit", ""),
+            "kv_unified": current_config.get("kv_unified", False),
+            "cache_reuse": current_config.get("cache_reuse"),
+            "spec_draft_p_min": current_config.get("spec_draft_p_min"),
+            "parameters": current_config.get("parameters") or persisted_config.get("parameters", {}),
         },
         "mmproj_enabled": current_config.get("mmproj", False),
         "mmproj_file": current_config.get("mmproj_file"),
@@ -2144,7 +2790,10 @@ async def list_gpus():
 
 @app.post("/api/models/deploy")
 async def deploy_model(request: Request):
-    data = await request.json()
+    raw_data = await request.json()
+    if not isinstance(raw_data, dict):
+        raise HTTPException(400, "部署参数必须是 JSON 对象")
+    data, canonical_parameters = _apply_canonical_parameter_payload(raw_data)
     filename = data.get("filename", "")
     model_record = await asyncio.to_thread(catalog_service.find, filename)
     if not model_record:
@@ -2197,6 +2846,7 @@ async def deploy_model(request: Request):
     tensor_split = data.get("tensor_split", None)
     engine = data.get("engine", "llama")
     llama_version = data.get("llama_version") or await asyncio.to_thread(_get_active_engine) or ""
+    profile_id = str(data.get("profile_id") or "default").strip() or "default"
     spec_draft_n_max = data.get("spec_draft_n_max", 1)
     spec_type = data.get("spec_type", "")  # 如 "draft-mtp,ngram-mod"，空=自动
     ngram_mod_n_min = data.get("ngram_mod_n_min", 8)
@@ -2213,8 +2863,62 @@ async def deploy_model(request: Request):
     use_mlock = data.get("use_mlock", False)
     numa = data.get("numa", "")
     poll_batch = data.get("poll_batch", 0)
+    # Optional common engine settings. They are emitted only after the
+    # selected VERSION.json/help probe advertises the corresponding key.
+    device = str(data.get("device", "") or "").strip()
+    fit = str(data.get("fit", "") or "").strip().lower()
+    kv_unified_raw = data.get("kv_unified", False)
+    kv_unified = kv_unified_raw is True or str(kv_unified_raw).lower() in {"1", "true", "on", "yes"}
+    cache_reuse_raw = data.get("cache_reuse", None)
+    spec_draft_p_min_raw = data.get("spec_draft_p_min", None)
 
     alias = model_record.get("family") or ""
+
+    # Apply the selected engine's recommended profile only when a caller did
+    # not send a value. This keeps the API and drawer behavior identical while
+    # preserving explicit user overrides.
+    pre_engine_record = _get_engine_by_key(llama_version) if engine == "llama" else None
+    profiles = (pre_engine_record or {}).get("profiles", {}) if isinstance(pre_engine_record, dict) else {}
+    if profiles and profile_id not in profiles:
+        raise HTTPException(400, f"引擎 profile 不存在: {profile_id}")
+    profile_record = profiles.get(profile_id, {}) if isinstance(profiles, dict) else {}
+    profile_values = profile_record.get("parameters") or profile_record.get("values") or {}
+    pre_recommended = dict((pre_engine_record or {}).get("recommended_params", {}))
+    if isinstance(profile_values, dict):
+        pre_recommended.update(profile_values)
+    if isinstance(pre_recommended, dict):
+        if "ctx_size" not in data:
+            ctx_size = pre_recommended.get("ctx_size", ctx_size)
+        if "ngl" not in data:
+            ngl = pre_recommended.get("ngl", ngl)
+        if "concurrency" not in data:
+            concurrency = pre_recommended.get("concurrency", concurrency)
+        if "batch" not in data:
+            batch = pre_recommended.get("batch", batch)
+        if "ubatch" not in data:
+            ubatch = pre_recommended.get("ubatch", ubatch)
+        if "spec_draft_n_max" not in data:
+            spec_draft_n_max = pre_recommended.get("spec_draft_n_max", spec_draft_n_max)
+        if "device" not in data:
+            device = str(pre_recommended.get("device", device) or "").strip()
+        if "fit" not in data:
+            fit = str(pre_recommended.get("fit", fit) or "").strip().lower()
+        if "kv_unified" not in data:
+            kv_unified = bool(pre_recommended.get("kv_unified", kv_unified))
+        if "cache_reuse" not in data:
+            cache_reuse_raw = pre_recommended.get("cache_reuse", cache_reuse_raw)
+        if "spec_draft_p_min" not in data:
+            spec_draft_p_min_raw = pre_recommended.get("spec_draft_p_min", spec_draft_p_min_raw)
+        if "threads" not in data:
+            threads = pre_recommended.get("threads", threads)
+        if "flash_attn" not in data and "flash_attn" in pre_recommended:
+            flash_attn = pre_recommended["flash_attn"]
+        if "temp" not in data:
+            temp = pre_recommended.get("temp", temp)
+        if "k_cache_type" not in data:
+            k_cache_type = pre_recommended.get("k_cache_type", k_cache_type)
+        if "v_cache_type" not in data:
+            v_cache_type = pre_recommended.get("v_cache_type", v_cache_type)
 
     if not ctx_size:
         ctx_size = model_record.get("ctx_default") or MODEL_CTX_SETTINGS.get(filepath.name, 131072)
@@ -2240,6 +2944,20 @@ async def deploy_model(request: Request):
     cache_ram = _bounded_int(cache_ram, "cache_ram", 0, 1048576)
     sleep_idle_seconds = _bounded_int(sleep_idle_seconds, "sleep_idle_seconds", 0, 86400)
     temp = _bounded_float(temp, "temp", 0, 5)
+    if isinstance(flash_attn, bool):
+        flash_attn = "on" if flash_attn else "off"
+    else:
+        flash_attn = str(flash_attn or "auto").strip().lower()
+    if flash_attn not in {"on", "off", "auto"}:
+        raise HTTPException(400, "flash_attn 必须是 on、off 或 auto")
+    if fit not in ("", "on", "off"):
+        raise HTTPException(400, "fit 必须是 on 或 off")
+    cache_reuse = None
+    if cache_reuse_raw not in (None, ""):
+        cache_reuse = _bounded_int(cache_reuse_raw, "cache_reuse", 0, 1048576)
+    spec_draft_p_min = None
+    if spec_draft_p_min_raw not in (None, ""):
+        spec_draft_p_min = _bounded_float(spec_draft_p_min_raw, "spec_draft_p_min", 0, 1)
 
     try:
         ipaddress.ip_address(str(host))
@@ -2270,6 +2988,39 @@ async def deploy_model(request: Request):
         raise HTTPException(400, f"llama_version 不存在或未注册: {llama_version!r}（可用引擎: {[e.get('key') for e in engines]}）")
     engine_record = _get_engine_by_key(llama_version) if engine == "llama" else None
     if engine == "llama":
+        _validate_canonical_parameters(engine_record or {}, canonical_parameters)
+        # The normalized deployment schema is the allow-list for optional
+        # engine flags. Common flags are available to all compatible binaries;
+        # truly custom flags remain isolated to their declaring engine.
+        branch_values = {
+            "device": device,
+            "fit": fit,
+            "kv_unified": kv_unified,
+            "cache_reuse": cache_reuse,
+            "spec_draft_p_min": spec_draft_p_min,
+        }
+        for parameter_name, parameter_value in branch_values.items():
+            is_set = parameter_value not in (None, "", False)
+            if is_set and not _engine_supports_parameter(engine_record, parameter_name):
+                raise HTTPException(
+                    400,
+                    f"参数 {parameter_name} 不是所选引擎的可用参数；请切换到支持该参数的引擎",
+                )
+        parameter_values = {
+            item.get("key"): item.get("values")
+            for item in (engine_record.get("deployment_parameters") or [])
+            if isinstance(item, dict) and item.get("values")
+        }
+        for parameter_name, parameter_value in {
+            "device": device,
+            "fit": fit,
+        }.items():
+            allowed_values = parameter_values.get(parameter_name) or []
+            if parameter_value and allowed_values and parameter_value not in allowed_values:
+                raise HTTPException(
+                    400,
+                    f"{parameter_name}={parameter_value} 不受所选引擎支持；可选: {', '.join(allowed_values)}",
+                )
         cache_types = _engine_cache_types(engine_record)
         draft_cache_types = _engine_cache_types(engine_record, draft=True)
         for cache_name, cache_value, supported_cache_types in (
@@ -2303,7 +3054,14 @@ async def deploy_model(request: Request):
         )
         if not Path(draft_model_path).is_file() or Path(draft_model_path).suffix.lower() != ".gguf":
             raise HTTPException(400, "草稿模型必须是模型目录内的 GGUF 文件")
-    reasoning = "on" if reasoning is True or str(reasoning).lower() in {"1", "true", "on"} else "off"
+    if reasoning is True or str(reasoning).lower() in {"1", "true", "on"}:
+        reasoning = "on"
+    elif reasoning is False or str(reasoning).lower() in {"0", "false", "off"}:
+        reasoning = "off"
+    else:
+        reasoning = str(reasoning).lower().strip()
+    if reasoning not in {"on", "off", "auto"}:
+        raise HTTPException(400, "reasoning 必须是 on、off 或 auto")
     kv_offload = "on" if kv_offload is True or str(kv_offload).lower() in {"1", "true", "on"} else "off"
     if engine == "llama" and (not filepath.is_file() or filepath.suffix.lower() != ".gguf"):
         raise HTTPException(400, "llama 引擎只允许部署 GGUF 文件")
@@ -2414,7 +3172,7 @@ async def deploy_model(request: Request):
             raise HTTPException(409, "该模型没有可确认匹配的视觉投影组件")
     # ui_flag is handled below as a conditional line item
 
-    flash_attn_str = "on" if flash_attn else "off"
+    flash_attn_str = str(flash_attn)
     cb_str = " -cb" if chunked_batch else ""
 
     lines = [
@@ -2444,6 +3202,9 @@ async def deploy_model(request: Request):
     eng = _get_engine_by_key(llama_version)
     if eng and eng.get("lib_path"):
         lines.append(f"export LD_LIBRARY_PATH={shlex.quote(str(eng['lib_path']))}:\"${{LD_LIBRARY_PATH:-}}\"")
+    generic_args, generic_exports = _generic_parameter_flags(eng, canonical_parameters)
+    lines.extend(_engine_environment_exports(eng))
+    lines.extend(generic_exports)
     tensor_split_line = (f"  --tensor-split {tensor_split} --main-gpu 0 \\") if tensor_split else ""
     spec_params = ""
     is_mtp_model = "MTP" in (model_record.get("classification", {}).get("capabilities") or [])
@@ -2476,6 +3237,8 @@ async def deploy_model(request: Request):
         spec_params = f" --spec-type {','.join(requested_types)}"
         if any(item in draft_types for item in requested_types):
             spec_params += f" --spec-draft-n-max {spec_draft_n_max}"
+            if spec_draft_p_min is not None and _engine_supports_parameter(engine_record, "spec_draft_p_min"):
+                spec_params += f" --spec-draft-p-min {spec_draft_p_min:g}"
         if any(item.startswith("ngram") for item in requested_types):
             spec_params += f" --spec-ngram-mod-n-min {ngram_mod_n_min} --spec-ngram-mod-n-max {ngram_mod_n_max} --spec-ngram-mod-n-match {ngram_mod_n_match}"
     else:
@@ -2497,6 +3260,15 @@ async def deploy_model(request: Request):
         extra_params += " --poll-batch 1"
     if n_cpu_moe:
         extra_params += f" --n-cpu-moe {n_cpu_moe}"
+    if device and _engine_supports_parameter(engine_record, "device"):
+        extra_params += f" --device {shlex.quote(device)}"
+    if fit and _engine_supports_parameter(engine_record, "fit"):
+        extra_params += f" --fit {fit}"
+    if kv_unified and _engine_supports_parameter(engine_record, "kv_unified"):
+        extra_params += " --kv-unified"
+    if cache_reuse is not None and _engine_supports_parameter(engine_record, "cache_reuse"):
+        extra_params += f" --cache-reuse {cache_reuse}"
+    generic_params = " " + " ".join(generic_args) if generic_args else ""
     if llama_version in ("turboquant", "turbo"):
         lines.append("export TURBO_AUTO_ASYMMETRIC=0")
     lines.append(f"exec {shlex.quote(str(llama_bin))} \\")
@@ -2516,7 +3288,7 @@ async def deploy_model(request: Request):
         f"  --threads-http {threads_http} --temp {temp} --reasoning {reasoning} \\",
         f"  --log-file /tmp/llama-server.log --log-verbosity 3 --log-colors off --metrics"
         + (f" --mmproj {shlex.quote(mmproj_path)}" if mmproj_path else "")
-        + spec_params + extra_params,
+        + spec_params + extra_params + generic_params,
     ]
     lines = [l for l in lines if l is not None]
     script_content = "\n".join(lines) + chr(10)
@@ -2537,6 +3309,8 @@ async def deploy_model(request: Request):
             binary=llama_bin,
             model=str(filepath),
             args=" ".join([l.strip("\\") for l in lines[1:] if l is not None]).replace("  ", " ").strip(),
+            parameters=canonical_parameters,
+            profile_id=profile_id,
         )
         await asyncio.to_thread(_switch_and_restart, llama_version, str(filepath))
     except Exception as exc:
@@ -2589,6 +3363,8 @@ async def deploy_model(request: Request):
         "reasoning": reasoning,
         "ui": ui,
         "llama_version": llama_version,
+        "spec_type": spec_type,
+        "spec_draft_n_max": spec_draft_n_max,
         "kv_offload": kv_offload,
         "n_cpu_moe": n_cpu_moe,
         "gpu": gpu,
@@ -2598,6 +3374,11 @@ async def deploy_model(request: Request):
         "use_mlock": use_mlock,
         "numa": numa,
         "poll_batch": poll_batch,
+        "device": device,
+        "fit": fit,
+        "kv_unified": kv_unified,
+        "cache_reuse": cache_reuse,
+        "spec_draft_p_min": spec_draft_p_min,
     }
 
 @app.post("/api/models/stop")
@@ -2938,6 +3719,103 @@ async def switch_version(request: Request):
     """切换 llama.cpp 版本并重启（不改变其他参数）"""
     data = await request.json()
     llama_version = data.get("llama_version") or await asyncio.to_thread(_get_active_engine) or ""
+
+    # Engine switching now uses the same canonical deployment planner as a
+    # normal deployment.  This keeps paths, profiles, environment variables,
+    # speculative decoding and rollback behavior identical across both entry
+    # points.  The legacy regex implementation below remains unreachable for
+    # one compatibility release and can be removed after old clients migrate.
+    target_engine = await asyncio.to_thread(_get_engine_by_key, llama_version)
+    if not target_engine or not Path(str(target_engine.get("binary_path") or "")).is_file():
+        raise HTTPException(400, "所选 llama.cpp 引擎不存在或二进制不可用")
+    runtime_before_switch = await asyncio.to_thread(_get_running_cmdline_config, True)
+    if not runtime_before_switch:
+        runtime_before_switch = parse_script_config(await asyncio.to_thread(read_start_script))
+    model_path = str((runtime_before_switch or {}).get("model_path") or "")
+    if not model_path:
+        raise HTTPException(400, "当前没有可切换的运行模型，请先部署模型")
+    try:
+        relative_model = str(Path(model_path).resolve().relative_to(Path(DATA_DIR).resolve()))
+    except (ValueError, OSError):
+        raise HTTPException(400, "当前模型路径不在模型目录内，已阻止切换")
+    model_record = await asyncio.to_thread(catalog_service.find, relative_model)
+    if not model_record:
+        raise HTTPException(404, "当前运行模型未登记，无法安全切换引擎")
+
+    def _artifact_id(path_value: str, role: str) -> str:
+        if not path_value:
+            return ""
+        candidate = catalog_service.find(str(path_value))
+        if candidate and candidate.get("role") == role:
+            return str(candidate.get("id") or "")
+        try:
+            relative = str(Path(path_value).resolve().relative_to(Path(DATA_DIR).resolve()))
+        except (ValueError, OSError):
+            relative = str(path_value)
+        candidate = catalog_service.find(relative)
+        return str(candidate.get("id") or "") if candidate and candidate.get("role") == role else ""
+
+    runtime = runtime_before_switch or {}
+    persisted_parameters: dict[str, Any] = {}
+    persisted_profile = "default"
+    try:
+        persisted = json.loads(Path("/data/inference-hub/state/persist_config.json").read_text(encoding="utf-8"))
+        if isinstance(persisted, dict):
+            persisted_parameters = persisted.get("parameters") if isinstance(persisted.get("parameters"), dict) else {}
+            persisted_profile = str(persisted.get("profile_id") or "default")
+    except (OSError, json.JSONDecodeError):
+        pass
+    target_keys = set(_engine_parameter_map(target_engine))
+    canonical_parameters = {key: value for key, value in persisted_parameters.items() if key in target_keys}
+    mmproj_id = _artifact_id(str(runtime.get("mmproj_file") or ""), "projection") if runtime.get("mmproj") else ""
+    draft_id = _artifact_id(str(runtime.get("draft_model_path") or ""), "draft")
+    switch_payload: dict[str, Any] = {
+        "filename": model_record.get("id"),
+        "engine": "llama",
+        "llama_version": llama_version,
+        "profile_id": data.get("profile_id") or persisted_profile,
+        "ctx_size": runtime.get("ctx_size", 131072),
+        "ngl": runtime.get("ngl", 99),
+        "gpu": runtime.get("gpu", "all"),
+        "concurrency": runtime.get("concurrency", 2),
+        "k_cache_type": runtime.get("k_cache_type", "q8_0"),
+        "v_cache_type": runtime.get("v_cache_type", "q8_0"),
+        "batch": runtime.get("batch", 1024),
+        "ubatch": runtime.get("ubatch", 512),
+        "flash_attn": runtime.get("flash_attn", True),
+        "chunked_batch": runtime.get("chunked_batch", True),
+        "threads": runtime.get("threads", 8),
+        "threads_http": runtime.get("threads_http", 4),
+        "temp": runtime.get("temp", 0.7),
+        "reasoning": runtime.get("reasoning", "off"),
+        "ui": runtime.get("ui", False),
+        "mmproj": bool(mmproj_id),
+        "mmproj_file": mmproj_id,
+        "draft_model_id": draft_id,
+        "spec_type": runtime.get("spec_type") or "none",
+        "spec_draft_n_max": runtime.get("spec_draft_n_max", 0),
+        "draft_k_cache_type": runtime.get("draft_k_cache_type", "q8_0"),
+        "draft_v_cache_type": runtime.get("draft_v_cache_type", "q8_0"),
+        "ngram_mod_n_min": runtime.get("ngram_mod_n_min") or 48,
+        "ngram_mod_n_max": runtime.get("ngram_mod_n_max") or 64,
+        "ngram_mod_n_match": runtime.get("ngram_mod_n_match") or 24,
+        "cache_ram": runtime.get("cache_ram", 8192),
+        "sleep_idle_seconds": runtime.get("sleep_idle_seconds", 300),
+        "device": runtime.get("device", ""),
+        "fit": runtime.get("fit", ""),
+        "kv_unified": runtime.get("kv_unified", False),
+        "cache_reuse": runtime.get("cache_reuse"),
+        "spec_draft_p_min": runtime.get("spec_draft_p_min"),
+        "parameters": canonical_parameters,
+    }
+    switched = await deploy_model(_JsonBodyRequest(switch_payload))
+    return {
+        "status": "ok",
+        "message": f"已切换到 {target_engine.get('name') or llama_version} 版本并重启",
+        "deployment": switched,
+    }
+
+    # Legacy script mutation path retained below for rollback reference.
     spec_draft_n_max = data.get("spec_draft_n_max", 3)
     engine_record = await asyncio.to_thread(_get_engine_by_key, llama_version)
     if not engine_record or not Path(str(engine_record.get("binary_path") or "")).is_file():
@@ -3088,6 +3966,24 @@ async def list_engines():
             "draft_cache_types": _engine_cache_types(e, draft=True),
             "spec_types": _engine_spec_types(e),
             "version_params": e.get("version_params", {}),
+            "backend": e.get("backend", ""),
+            "branch": e.get("branch", ""),
+            "commit": e.get("commit", ""),
+            "source": e.get("source", ""),
+            "github_url": e.get("github_url", ""),
+            "gpu_targets": e.get("gpu_targets", []),
+            "driver": e.get("driver", ""),
+            "parameter_schema": e.get("parameter_schema", []),
+            "deployment_parameters": e.get("deployment_parameters", e.get("parameter_schema", [])),
+            "parameter_notes": e.get("parameter_notes", []),
+            "recommended_params": e.get("recommended_params", {}),
+            "exclusive_parameters": e.get("exclusive_parameters", []),
+            "parameter_differences": e.get("parameter_differences", {}),
+            "parameter_file": e.get("parameter_file", ""),
+            "parameter_config_version": e.get("parameter_config_version"),
+            "profiles": e.get("profiles", {}),
+            "load_strategy": e.get("load_strategy", {}),
+            "engine_environment": e.get("engine_environment", {}),
             "type": e.get("type", "llama"),
         })
     return {"engines": result}

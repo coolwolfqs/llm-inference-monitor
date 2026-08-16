@@ -6,6 +6,7 @@ export interface ModelClassification {
   active_parameters?: string[]
   context_length?: number | null
   confidence?: 'high' | 'medium' | 'low'
+  capabilities?: string[]
   warnings?: Array<{ code: string; field?: string }>
 }
 
@@ -33,6 +34,7 @@ export interface ModelArtifact {
 
 export interface RuntimeConfig {
   llama_version?: string
+  profile_id?: string
   ctx_size?: number
   ngl?: number
   concurrency?: number
@@ -57,6 +59,12 @@ export interface RuntimeConfig {
   ngram_mod_n_min?: number
   ngram_mod_n_max?: number
   ngram_mod_n_match?: number
+  device?: string
+  fit?: string
+  kv_unified?: boolean
+  cache_reuse?: number | null
+  spec_draft_p_min?: number | null
+  parameters?: Record<string, unknown>
 }
 
 export interface ProjectionArtifact {
@@ -84,6 +92,7 @@ export interface ModelsResponse {
 export interface Engine {
   key: string
   name: string
+  binary_path?: string
   version: string
   type: string
   features: string[]
@@ -94,6 +103,67 @@ export interface Engine {
   draft_cache_types?: string[]
   spec_types?: string[]
   version_params?: Record<string, unknown>
+  backend?: string
+  branch?: string
+  commit?: string
+  source?: string
+  github_url?: string
+  gpu_targets?: string[]
+  driver?: string
+  parameter_schema?: EngineParameter[]
+  parameter_notes?: string[]
+  recommended_params?: Record<string, unknown>
+  deployment_parameters?: EngineParameter[]
+  exclusive_parameters?: string[]
+  parameter_differences?: Record<string, {
+    recommended?: unknown
+    default?: unknown
+    reason?: string
+  }>
+  parameter_file?: string
+  parameter_config_version?: number | null
+  profiles?: Record<string, {
+    label?: string
+    description?: string
+    parameters?: Record<string, unknown>
+    values?: Record<string, unknown>
+  }>
+  load_strategy?: {
+    model_root?: string
+    binary_root?: string
+    default?: Record<string, unknown>
+    artifacts?: string[]
+    [key: string]: unknown
+  }
+  engine_environment?: Record<string, unknown>
+}
+
+export interface EngineParameter {
+  key: string
+  label?: string
+  type?: string
+  description?: string
+  flag?: string
+  group?: string
+  supported?: boolean
+  common?: boolean
+  default?: unknown
+  recommended?: unknown
+  min?: number
+  max?: number
+  step?: number
+  values?: string[]
+  false_flag?: string
+  env?: string
+  managed?: boolean
+  placeholder?: string
+  visible_when?: Record<string, unknown>
+  requires?: string[]
+  conflicts?: string[]
+  source?: string
+  secret?: boolean
+  deprecated?: boolean
+  load_phase?: 'env' | 'model' | 'runtime' | string
 }
 
 export interface Operation {
@@ -135,7 +205,8 @@ export interface DeployPayload {
   temp: number
   engine: string
   llama_version: string
-  reasoning: 'on' | 'off'
+  profile_id?: string
+  reasoning: 'on' | 'off' | 'auto'
   ui: boolean
   mmproj: boolean
   mmproj_file: string
@@ -150,4 +221,10 @@ export interface DeployPayload {
   ngram_mod_n_match: number
   cache_ram: number
   sleep_idle_seconds: number
+  device?: string
+  fit?: string
+  kv_unified?: boolean
+  cache_reuse?: number | null
+  spec_draft_p_min?: number | null
+  parameters?: Record<string, unknown>
 }

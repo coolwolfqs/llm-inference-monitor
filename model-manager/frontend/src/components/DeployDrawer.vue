@@ -2,7 +2,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { CheckCircle2, ChevronDown, Rocket, XCircle } from 'lucide-vue-next'
 import { api } from '../services/api'
-import type { DeployPayload, Engine, ModelArtifact, Preflight, ProjectionArtifact, RuntimeConfig } from '../types/model'
+import type { DeployPayload, Engine, EngineParameter, ModelArtifact, Preflight, ProjectionArtifact, RuntimeConfig } from '../types/model'
 
 const props = defineProps<{ model: ModelArtifact; currentConfig: RuntimeConfig }>()
 const emit = defineEmits<{ close: []; deployed: [taskId: string] }>()
@@ -14,12 +14,15 @@ const loading = ref(true)
 const submitting = ref(false)
 const error = ref('')
 const supportsMtp = props.model.tags.includes('MTP')
+  || (props.model.classification?.capabilities || []).some((item) => item.toLowerCase() === 'mtp')
 const contextOptions = [32768, 65536, 131072, 196608, 262144, 524288, 1048576]
 const fallbackCacheTypes = ['f32', 'f16', 'bf16', 'q8_0', 'q4_0', 'q4_1', 'iq4_nl', 'q5_0', 'q5_1']
 // MTP is selected by model recognition, while n-gram stays opt-in. Both
 // controls remain visible so the user can see and change the effective mode.
 const mtpEnabled = ref(supportsMtp)
 const ngramEnabled = ref(false)
+const profileId = ref('default')
+const parameterValues = reactive<Record<string, unknown>>({})
 
 const form = reactive<DeployPayload>({
   filename: props.model.id,
@@ -52,6 +55,11 @@ const form = reactive<DeployPayload>({
   ngram_mod_n_match: props.currentConfig.ngram_mod_n_match || 16,
   cache_ram: props.currentConfig.cache_ram || 2048,
   sleep_idle_seconds: props.currentConfig.sleep_idle_seconds || 300,
+  device: props.currentConfig.device || '',
+  fit: props.currentConfig.fit || '',
+  kv_unified: props.currentConfig.kv_unified || false,
+  cache_reuse: props.currentConfig.cache_reuse ?? undefined,
+  spec_draft_p_min: props.currentConfig.spec_draft_p_min ?? undefined,
 })
 
 const selectedEngine = computed(() => engines.value.find((item) => item.key === form.llama_version))
@@ -71,6 +79,100 @@ const draftCacheTypes = computed(() => {
   const values = selectedEngine.value?.draft_cache_types
   return values?.length ? values : cacheTypes.value
 })
+const engineParameterSchema = computed(() => selectedEngine.value?.deployment_parameters || selectedEngine.value?.parameter_schema || [])
+const engineRecommendedParams = computed(() => selectedEngine.value?.recommended_params || {})
+const engineDifferences = computed(() => Object.entries(selectedEngine.value?.parameter_differences || {}))
+const supportedEngineParameterCount = computed(() => engineParameterSchema.value.filter((parameter) => parameter.supported !== false).length)
+const engineProfiles = computed(() => selectedEngine.value?.profiles || {})
+const profileOptions = computed(() => Object.entries(engineProfiles.value))
+
+const dynamicParameterGroups = computed(() => {
+  const groups = new Map<string, EngineParameter[]>()
+  for (const parameter of engineParameterSchema.value) {
+    if (parameter.supported === false || parameter.managed || !isParameterVisible(parameter)) continue
+    const group = parameter.group || '引擎参数'
+    const values = groups.get(group) || []
+    values.push(parameter)
+    groups.set(group, values)
+  }
+  return Array.from(groups.entries()).map(([name, parameters]) => ({ name, parameters }))
+})
+
+function supportsEngineParameter(key: string) {
+  return engineParameterSchema.value.some((item) => item.key === key && item.supported !== false)
+}
+
+function engineParameter(key: string) {
+  return engineParameterSchema.value.find((item) => item.key === key)
+}
+
+function isParameterVisible(parameter: EngineParameter) {
+  const visible = parameter.visible_when
+  if (!visible || typeof visible !== 'object') return true
+  return Object.entries(visible).every(([key, expected]) => {
+    const actual = parameterValues[key]
+    return Array.isArray(expected) ? expected.includes(actual) : actual === expected
+  })
+}
+
+function inputType(parameter: EngineParameter) {
+  if (parameter.type === 'integer' || parameter.type === 'number') return 'number'
+  return 'text'
+}
+
+function parameterHint(parameter: EngineParameter) {
+  const pieces = [parameter.description]
+  if (parameter.flag) pieces.push(parameter.flag)
+  if (parameter.env) pieces.push(`环境变量 ${parameter.env}`)
+  return pieces.filter(Boolean).join(' · ')
+}
+
+function recommendedValue(parameter: EngineParameter) {
+  const value = engineRecommendedParams.value[parameter.key]
+  if (value === undefined || value === null || value === '') return '通用默认'
+  if (typeof value === 'boolean') return value ? '开启' : '关闭'
+  return String(value)
+}
+
+function applyEngineProfile() {
+  // Clear branch-only values when returning to an older engine. This prevents
+  // an option from being accidentally sent to a binary that did not advertise
+  // it in VERSION.json.
+  form.device = ''
+  form.fit = ''
+  form.kv_unified = false
+  form.cache_reuse = undefined
+  form.spec_draft_p_min = undefined
+
+  const profile = engineProfiles.value[profileId.value]
+  const profileValues = profile?.parameters || profile?.values || {}
+  const recommended = { ...engineRecommendedParams.value, ...profileValues }
+  form.profile_id = profileId.value
+  if (typeof recommended.ctx_size === 'number') form.ctx_size = recommended.ctx_size
+  if (typeof recommended.ngl === 'number') form.ngl = recommended.ngl
+  if (typeof recommended.device === 'string') form.device = recommended.device
+  if (recommended.fit === 'on' || recommended.fit === 'off') form.fit = recommended.fit
+  if (typeof recommended.kv_unified === 'boolean') form.kv_unified = recommended.kv_unified
+  if (typeof recommended.cache_reuse === 'number') form.cache_reuse = recommended.cache_reuse
+  if (typeof recommended.spec_draft_p_min === 'number') form.spec_draft_p_min = recommended.spec_draft_p_min
+  if (typeof recommended.batch === 'number') form.batch = recommended.batch
+  if (typeof recommended.ubatch === 'number') form.ubatch = recommended.ubatch
+  if (typeof recommended.concurrency === 'number') form.concurrency = recommended.concurrency
+  if (typeof recommended.spec_draft_n_max === 'number') form.spec_draft_n_max = recommended.spec_draft_n_max
+  if (typeof recommended.threads === 'number') form.threads = recommended.threads
+  if (typeof recommended.temp === 'number') form.temp = recommended.temp
+  if (typeof recommended.k_cache_type === 'string') form.k_cache_type = recommended.k_cache_type
+  if (typeof recommended.v_cache_type === 'string') form.v_cache_type = recommended.v_cache_type
+  for (const parameter of engineParameterSchema.value) {
+    if (parameter.supported === false || parameter.managed) continue
+    const profileValue = profileValues[parameter.key]
+    const currentValue = props.currentConfig.parameters?.[parameter.key]
+    const recommendedValue = engineRecommendedParams.value[parameter.key]
+    const value = profileValue ?? currentValue ?? recommendedValue ?? parameter.default
+    if (value !== undefined && value !== null) parameterValues[parameter.key] = value
+    else delete parameterValues[parameter.key]
+  }
+}
 
 function projectorForValue(value: string) {
   const wanted = String(value || '').trim()
@@ -114,8 +216,14 @@ watch(engineSupportsMtp, (available) => {
 
 watch(() => form.llama_version, (key) => {
   if (key) window.localStorage.setItem('model-manager:last-engine', key)
+  if (key && engines.value.length) {
+    profileId.value = 'default'
+    applyEngineProfile()
+  }
   keepCacheSelection()
 })
+
+watch(profileId, () => applyEngineProfile())
 
 watch(mtpEnabled, (enabled) => {
   if (enabled) form.draft_model_id = ''
@@ -143,6 +251,8 @@ onMounted(async () => {
       engines.value[0]?.key,
     ].filter((key): key is string => Boolean(key))
     form.llama_version = engineCandidates.find((key) => engines.value.some((item) => item.key === key)) || ''
+    profileId.value = 'default'
+    applyEngineProfile()
     keepCacheSelection()
     // The computed value is initially false while the engine list is loading,
     // so explicitly clear a previously saved MTP selection once the actual
@@ -170,6 +280,12 @@ async function submit() {
     const selectedProjector = projectorForValue(form.mmproj_file)
     form.mmproj_file = selectedProjector?.id || ''
     form.mmproj = Boolean(selectedProjector)
+    form.parameters = Object.fromEntries(
+      Object.entries(parameterValues).filter(([key, value]) => {
+        const parameter = engineParameter(key)
+        return parameter && parameter.supported !== false && !parameter.managed && value !== undefined
+      }),
+    )
     const check = await api.preflight(props.model.id)
     if (!check.can_deploy) throw new Error(check.blockers.join('；') || '部署预检未通过')
     const task = await api.deploy(form)
@@ -216,6 +332,7 @@ async function submit() {
           <label v-if="draftModels.length || engineSupportsDraft" class="full-field draft-model-field"><span>外置草稿模型</span><select v-model="form.draft_model_id" :disabled="!draftAvailable || mtpEnabled"><option value="">不使用外置草稿模型</option><option v-for="draft in draftModels" :key="draft.id" :value="draft.id">{{ draft.name }} · {{ draft.size_human }}</option></select><small>{{ mtpEnabled ? '已启用 MTP 内置草稿层；如需外置草稿模型，请先取消 MTP' : draftAvailable ? '仅展示与当前主模型同包或同族的草稿组件' : '当前模型包未发现可用草稿模型，或所选引擎不支持 --model-draft' }}</small></label>
           <div v-if="mtpEnabled || ngramEnabled" class="form-grid enhancement-params">
             <label v-if="mtpEnabled"><span>Draft 预测数</span><input v-model.number="form.spec_draft_n_max" type="number" min="1" max="32" /></label>
+            <label v-if="mtpEnabled && supportsEngineParameter('spec_draft_p_min')"><span>Draft 接受阈值</span><input v-model.number="form.spec_draft_p_min" type="number" min="0" max="1" step="0.01" /><small>当前引擎推荐 {{ recommendedValue({ key: 'spec_draft_p_min' }) }}</small></label>
             <label v-if="ngramEnabled"><span>ngram 查找长度</span><input v-model.number="form.ngram_mod_n_match" type="number" min="1" max="256" /></label>
           </div>
         </section>
@@ -223,7 +340,24 @@ async function submit() {
         <section class="form-section">
           <h3>运行引擎</h3>
           <label class="full-field"><span>llama.cpp 版本</span><select v-model="form.llama_version"><option v-for="engine in engines" :key="engine.key" :value="engine.key">{{ engine.name }} · {{ engine.version }}</option></select></label>
+          <label v-if="profileOptions.length" class="full-field"><span>部署 profile</span><select v-model="profileId"><option v-for="([key, profile]) in profileOptions" :key="key" :value="key">{{ profile.label || key }}</option></select><small>profile 只覆盖推荐值，仍可继续调整公共参数。</small></label>
           <div v-if="selectedEngine" class="feature-row"><span v-for="feature in selectedEngine.features" :key="feature">{{ feature }}</span></div>
+          <div v-if="selectedEngine" class="engine-profile">
+            <div class="engine-profile-title">{{ selectedEngine.branch ? `分支：${selectedEngine.branch}` : '通用 llama.cpp 引擎' }}<span v-if="selectedEngine.gpu_targets?.length"> · {{ selectedEngine.gpu_targets.join(', ') }}</span></div>
+            <p v-if="selectedEngine.backend || selectedEngine.driver">后端：{{ selectedEngine.backend || 'llama' }}<span v-if="selectedEngine.driver"> · 驱动：{{ selectedEngine.driver }}</span></p>
+            <p v-if="selectedEngine.binary_path">二进制：<code>{{ selectedEngine.binary_path }}</code></p>
+            <p v-if="selectedEngine.parameter_file">参数来源：<code>{{ selectedEngine.parameter_file }}</code></p>
+            <p v-if="selectedEngine.load_strategy?.default">加载策略：{{ selectedEngine.load_strategy.default.load_mode || '默认' }}<span v-if="selectedEngine.load_strategy.default.fit"> · Fit {{ selectedEngine.load_strategy.default.fit }}</span><span v-if="selectedEngine.load_strategy.default.kv_cache"> · KV {{ selectedEngine.load_strategy.default.kv_cache }}</span></p>
+            <p v-for="note in selectedEngine.parameter_notes" :key="note">{{ note }}</p>
+            <p>统一参数 {{ supportedEngineParameterCount }} 项；独占参数 {{ selectedEngine.exclusive_parameters?.length || 0 }} 项。</p>
+            <p v-if="!engineDifferences.length && !selectedEngine.exclusive_parameters?.length">该引擎没有额外差异，使用统一部署参数。</p>
+            <div v-if="engineDifferences.length" class="engine-parameter-list">
+              <span v-for="([key, difference]) in engineDifferences" :key="key" :title="difference.reason">{{ key }}：{{ difference.recommended }}</span>
+            </div>
+            <div v-if="selectedEngine.exclusive_parameters?.length" class="engine-parameter-list">
+              <span v-for="key in selectedEngine.exclusive_parameters" :key="key">独占：{{ key }}</span>
+            </div>
+          </div>
         </section>
 
         <details class="advanced-panel">
@@ -241,12 +375,40 @@ async function submit() {
             <label><span>温度</span><input v-model.number="form.temp" type="number" step="0.1" /></label>
             <label><span>Cache RAM (MiB)</span><input v-model.number="form.cache_ram" type="number" /></label>
             <label><span>空闲休眠 (秒)</span><input v-model.number="form.sleep_idle_seconds" type="number" /></label>
+            <template v-if="selectedEngine && engineParameterSchema.length">
+              <label v-if="supportsEngineParameter('device')"><span>设备</span><select v-if="engineParameter('device')?.values?.length" v-model="form.device"><option v-for="value in engineParameter('device')?.values" :key="value" :value="value">{{ value }}</option></select><input v-else v-model="form.device" placeholder="Vulkan0" /><small>统一设备参数，按引擎自动填充</small></label>
+              <label v-if="supportsEngineParameter('fit')"><span>Fit 模式</span><select v-model="form.fit"><option value="">默认</option><option value="on">on</option><option value="off">off</option></select></label>
+              <label v-if="supportsEngineParameter('cache_reuse')"><span>Cache reuse</span><input v-model.number="form.cache_reuse" type="number" min="0" max="1048576" /></label>
+            </template>
           </div>
           <div class="switch-list">
             <label><input v-model="form.flash_attn" type="checkbox" /><span>Flash Attention</span></label>
             <label><input v-model="form.chunked_batch" type="checkbox" /><span>连续批处理</span></label>
             <label><input v-model="form.ui" type="checkbox" /><span>Web UI</span></label>
+            <label v-if="supportsEngineParameter('kv_unified')"><input v-model="form.kv_unified" type="checkbox" /><span>统一 KV Cache（引擎推荐）</span></label>
           </div>
+        </details>
+        <details v-if="dynamicParameterGroups.length" class="advanced-panel engine-parameters-panel">
+          <summary>引擎参数与扩展设置 <ChevronDown :size="16" /></summary>
+          <p class="parameter-panel-help">以下字段由当前引擎目录的 deployment-parameters.json 生成；新增引擎只需补充配置文件，不需要修改页面。</p>
+          <section v-for="group in dynamicParameterGroups" :key="group.name" class="parameter-group">
+            <h4>{{ group.name }}</h4>
+            <div class="form-grid advanced-grid">
+              <label v-for="parameter in group.parameters" :key="parameter.key" :title="parameterHint(parameter)">
+                <template v-if="parameter.type === 'boolean'">
+                  <span class="parameter-toggle"><input v-model="parameterValues[parameter.key]" type="checkbox" /><span>{{ parameter.label || parameter.key }}</span></span>
+                </template>
+                <template v-else>
+                  <span>{{ parameter.label || parameter.key }}</span>
+                  <select v-if="(parameter.type === 'select' || parameter.type === 'multi-select') && parameter.values?.length" v-model="parameterValues[parameter.key]" :multiple="parameter.type === 'multi-select'">
+                    <option v-for="value in parameter.values" :key="value" :value="value">{{ value }}</option>
+                  </select>
+                  <input v-else v-model="parameterValues[parameter.key]" :type="inputType(parameter)" :min="parameter.min" :max="parameter.max" :step="parameter.step" :placeholder="parameter.placeholder" />
+                </template>
+                <small v-if="parameterHint(parameter)">{{ parameterHint(parameter) }}</small>
+              </label>
+            </div>
+          </section>
         </details>
         <p v-if="error" class="form-error">{{ error }}</p>
       </div>

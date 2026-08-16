@@ -1,0 +1,24 @@
+{
+  "schema_version": 2,
+  "extends": "../common/deployment-parameters.json",
+  "runtime_type": "llama",
+  "notes": [
+    "Strix Halo Vulkan 分支，针对 gfx1151/RADV 提供 MoE 和 MTP 调优。",
+    "分支没有新增公开 llama-server CLI 命名空间；差异来自编译内核、环境开关和推荐 profile。",
+    "GGML_VK_MMID_WG256 属于实验性引擎参数，默认关闭。"
+  ],
+  "load_strategy": {
+    "model_root": "/data/models",
+    "binary_root": "/data/engines",
+    "default": {"load_mode": "mmap", "fit": "off", "kv_cache": "q8_0", "kv_unified": true},
+    "artifacts": ["model", "draft_model", "mmproj"]
+  },
+  "profiles": {
+    "default": {"label": "Strix Halo 默认", "parameters": {"device": "Vulkan0", "fit": "off", "batch": 512, "ubatch": 512, "concurrency": 1, "spec_draft_n_max": 4, "spec_draft_p_min": 0.55, "kv_unified": true, "cache_reuse": 256, "k_cache_type": "q8_0", "v_cache_type": "q8_0"}},
+    "concurrent_2": {"label": "双并发", "parameters": {"device": "Vulkan0", "fit": "off", "batch": 512, "ubatch": 512, "concurrency": 2, "kv_unified": true, "cache_reuse": 256}},
+    "long_context": {"label": "长上下文", "parameters": {"device": "Vulkan0", "fit": "off", "ctx_size": 524288, "batch": 512, "ubatch": 512, "kv_unified": true}}
+  },
+  "parameters": [
+    {"key":"ggml_vk_mmid_wg256","label":"MMID WG256 实验开关","type":"boolean","env":"GGML_VK_MMID_WG256","default":false,"group":"引擎专属","common":false,"supported":true,"description":"Strix Vulkan 分支实验参数；开启前应通过基准测试验证。"}
+  ]
+}

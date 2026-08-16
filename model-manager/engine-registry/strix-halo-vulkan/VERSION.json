@@ -1,0 +1,162 @@
+{
+  "key": "strix-halo-vulkan",
+  "id": "strix-halo-vulkan",
+  "name": "Strix Halo Vulkan",
+  "type": "llama",
+  "backend": "vulkan",
+  "version": "baf0025",
+  "commit": "baf0025de861c6f6ea3720fa81c52ae1b2e6c078",
+  "branch": "strix-halo-vulkan",
+  "source": "Nathanw1014/llama.cpp",
+  "github_url": "https://github.com/Nathanw1014/llama.cpp/tree/strix-halo-vulkan",
+  "built_at": "2026-08-16T00:00:00+08:00",
+  "binary_path": "/data/engines/nathan-strix/build-strix-vulkan/bin/llama-server",
+  "build_dir": "/data/engines/nathan-strix/build-strix-vulkan",
+  "gpu_targets": ["gfx1151"],
+  "driver": "RADV",
+  "features": ["gfx1151", "Vulkan/RADV", "FlashAttention", "KV/MoE kernels", "MTP"],
+  "supports_mtp": true,
+  "supports_draft_model": true,
+  "supports_ngram": true,
+  "exclusive_parameters": [],
+  "parameter_differences": {
+    "device": {
+      "recommended": "Vulkan0",
+      "reason": "gfx1151/RADV 设备"
+    },
+    "fit": {
+      "recommended": "off",
+      "reason": "对照测试时避免自动改写未设置参数"
+    },
+    "batch": {
+      "recommended": 512,
+      "reason": "Strix Halo Vulkan 实测推荐值"
+    },
+    "ubatch": {
+      "recommended": 512,
+      "reason": "Strix Halo Vulkan 实测推荐值"
+    },
+    "concurrency": {
+      "recommended": 1,
+      "reason": "默认单并发，双并发可手动调整"
+    },
+    "spec_draft_n_max": {
+      "recommended": 4,
+      "reason": "MTP 实测推荐值"
+    },
+    "spec_draft_p_min": {
+      "recommended": 0.55,
+      "reason": "MTP 实测推荐值"
+    },
+    "kv_unified": {
+      "recommended": true,
+      "reason": "Strix Halo Vulkan 实测推荐开启"
+    },
+    "cache_reuse": {
+      "recommended": 256,
+      "reason": "KV 复用实测推荐值"
+    }
+  },
+  "version_params": {
+    "spec_draft_n_max": 4,
+    "spec_draft_p_min": 0.55
+  },
+  "parameter_notes": [
+    "此分支面向 AMD gfx1151/Strix Halo，部署时推荐 Vulkan0、-np 1、batch/ubatch 512。",
+    "分支没有独占的 llama-server CLI 参数；差异主要来自 Vulkan shader/kernel 实现，参数差异是经过实测的推荐组合。",
+    "MTP 推荐 spec-draft-n-max=4、spec-draft-p-min=0.55；K/V Cache 默认 q8_0。"
+  ],
+  "recommended_params": {
+    "device": "Vulkan0",
+    "fit": "off",
+    "batch": 512,
+    "ubatch": 512,
+    "concurrency": 1,
+    "spec_draft_n_max": 4,
+    "spec_draft_p_min": 0.55,
+    "kv_unified": true,
+    "cache_reuse": 256
+  },
+  "parameter_schema": [
+    {
+      "key": "device",
+      "label": "Vulkan 设备",
+      "type": "select",
+      "values": ["Vulkan0"],
+      "default": "Vulkan0",
+      "flag": "--device",
+      "description": "gfx1151/RADV 设备选择"
+    },
+    {
+      "key": "fit",
+      "label": "Fit 模式",
+      "type": "select",
+      "values": ["on", "off"],
+      "default": "off",
+      "flag": "--fit",
+      "description": "分支对照测试使用 off，避免自动调整上下文和 batch"
+    },
+    {
+      "key": "kv_unified",
+      "label": "统一 KV Cache",
+      "type": "boolean",
+      "default": true,
+      "flag": "--kv-unified",
+      "description": "Strix Halo 分支推荐开启"
+    },
+    {
+      "key": "cache_reuse",
+      "label": "Cache reuse",
+      "type": "integer",
+      "min": 0,
+      "max": 1048576,
+      "default": 256,
+      "flag": "--cache-reuse",
+      "description": "KV 复用的最小 chunk 大小"
+    },
+    {
+      "key": "spec_draft_n_max",
+      "label": "Draft 预测数",
+      "type": "integer",
+      "min": 1,
+      "max": 32,
+      "default": 4,
+      "flag": "--spec-draft-n-max"
+    },
+    {
+      "key": "spec_draft_p_min",
+      "label": "Draft 接受阈值",
+      "type": "number",
+      "min": 0,
+      "max": 1,
+      "step": 0.01,
+      "default": 0.55,
+      "flag": "--spec-draft-p-min",
+      "description": "MTP 推测 token 的最小接受概率"
+    },
+    {
+      "key": "batch",
+      "label": "Batch",
+      "type": "integer",
+      "default": 512,
+      "flag": "-b",
+      "description": "该分支的实测推荐值"
+    },
+    {
+      "key": "ubatch",
+      "label": "Ubatch",
+      "type": "integer",
+      "default": 512,
+      "flag": "-ub",
+      "description": "该分支的实测推荐值"
+    },
+    {
+      "key": "concurrency",
+      "label": "并发数",
+      "type": "integer",
+      "default": 1,
+      "flag": "-np",
+      "description": "性能对照使用单并发；双并发可手动调整"
+    }
+  ]
+}

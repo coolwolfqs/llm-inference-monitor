@@ -1,0 +1,16 @@
+{
+  "key": "rocm",
+  "name": "llama.cpp ROCm",
+  "type": "llama",
+  "version": "b10438-5-g27df9199d",
+  "upstream_tag": "b10438",
+  "commit": "27df9199d",
+  "branch": "master",
+  "backend": "rocm",
+  "binary_path": "/data/engines/llama/build-rocm/bin/llama-server",
+  "build_dir": "build-rocm",
+  "gpu_targets": ["gfx1151"],
+  "rocm_version": "7.2.4",
+  "hip_rocwmma_fattn": true,
+  "features": ["muse-glimmer", "minimax-m1", "ggml-0.20.0"]
+}

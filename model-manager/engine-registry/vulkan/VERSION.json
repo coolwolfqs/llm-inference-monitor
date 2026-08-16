@@ -1,0 +1,16 @@
+{
+  "key": "vulkan",
+  "name": "llama.cpp Vulkan",
+  "type": "llama",
+  "version": "b10438-5-g27df9199d",
+  "upstream_tag": "b10438",
+  "commit": "27df9199d",
+  "branch": "master",
+  "source": "ggml-org/llama.cpp",
+  "backend": "vulkan",
+  "binary_path": "/data/engines/llama/build-vulkan/bin/llama-server",
+  "build_dir": "build-vulkan",
+  "gpu_targets": ["gfx1151"],
+  "driver": "RADV",
+  "features": ["muse-glimmer", "minimax-m1", "ggml-0.20.0"]
+}
