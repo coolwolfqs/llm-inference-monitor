@@ -31,6 +31,12 @@ from mm_core.operations import OperationStore
 from mm_core.tasks import DeploymentTaskStore
 from mm_core.downloads import DownloadTaskStore
 from mm_core.runtime import SingleFlightTTLCache, service_pids
+from mm_core.deployment import (
+    DeploymentPlanError,
+    match_model_engine,
+    model_requirements,
+    resolve_deployment_plan,
+)
 
 APP_DIR = str(settings.app_dir)
 DATA_DIR = str(settings.models_dir)
@@ -2437,10 +2443,9 @@ async def model_preflight(model_id: str):
     # launcher; the legacy branch only wrote args then restarted llama.cpp.
     registered_types.discard("vllm")
     supported = set(model.get("supported_engines") or [])
-    ready = sorted(supported & registered_types)
     llama_engines = [
         item for item in registered
-        if item.get("type", "llama") == "llama" and "llama" in supported
+        if item.get("type", "llama") == "llama"
     ]
     blockers = []
     if not model.get("deployable"):
@@ -2448,30 +2453,75 @@ async def model_preflight(model_id: str):
             blockers.append("EXTENSOR GGUF 需要专用推理引擎，当前 llama.cpp 不支持")
         else:
             blockers.append(f"{model.get('category')} 不能独立部署")
-    if supported and not ready:
-        blockers.append(f"节点未注册兼容引擎；模型需要 {sorted(supported)}")
     projectors = [
         item
         for item in projectors_all
         if item.get("relative_dir") == model.get("relative_dir")
     ]
     classification = model.get("classification") or {}
-    if "Vision" in (classification.get("capabilities") or []) and not projectors and model.get("format") == "GGUF":
+    model_capabilities = {
+        str(value).strip().lower()
+        for value in (classification.get("capabilities") or [])
+        if str(value).strip()
+    }
+    if "vision" in model_capabilities and not projectors and model.get("format") == "GGUF":
         blockers.append("模型声明视觉能力，但没有找到同包视觉投影组件")
     draft_models = _list_draft_models_for_model(model)
+    engine_matches = []
+    for item in llama_engines:
+        match = match_model_engine(model, item, projectors=projectors, draft_models=draft_models)
+        profile_summaries = {}
+        profiles = item.get("profiles") if isinstance(item.get("profiles"), dict) else {}
+        for profile_key, profile in profiles.items():
+            try:
+                plan = resolve_deployment_plan(
+                    model,
+                    item,
+                    profile_id=str(profile_key),
+                    projectors=projectors,
+                    draft_models=draft_models,
+                )
+                profile_summaries[str(profile_key)] = {
+                    "label": profile.get("label") if isinstance(profile, dict) else str(profile_key),
+                    "compatible": True,
+                    "parameters": plan.get("parameters", {}),
+                    "limits": plan.get("limits", {}),
+                }
+            except DeploymentPlanError as exc:
+                profile_summaries[str(profile_key)] = {
+                    "label": profile.get("label") if isinstance(profile, dict) else str(profile_key),
+                    "compatible": False,
+                    "reasons": [str(exc)],
+                }
+        engine_matches.append({
+            "key": item.get("key"),
+            "name": item.get("name"),
+            "version": item.get("version"),
+            "compatible": match.compatible,
+            "reasons": list(match.reasons),
+            "warnings": list(match.warnings),
+            "capabilities": list(match.capabilities),
+            "recommended_profile": "default" if "default" in profile_summaries else (next(iter(profile_summaries), None)),
+            "profiles": profile_summaries,
+        })
+    compatible_versions = [item["key"] for item in engine_matches if item.get("compatible") and item.get("key")]
+    ready = sorted({"llama"} if compatible_versions else set())
+    if supported and not ready:
+        blockers.append(f"节点没有与该模型能力匹配的引擎；模型需要 {sorted(supported)}")
     active_engine = _get_active_engine()
     default_llama_version = next(
         (
-            item.get("key")
-            for item in llama_engines
-            if item.get("key") == active_engine
+            item.get("key") for item in engine_matches
+            if item.get("compatible") and item.get("key") == active_engine
         ),
         None,
-    ) or (llama_engines[0].get("key") if llama_engines else None)
+    ) or (compatible_versions[0] if compatible_versions else None)
     return {
         "model": model,
         "compatible_engines": ready,
-        "compatible_llama_versions": [item.get("key") for item in llama_engines],
+        "compatible_llama_versions": compatible_versions,
+        "engine_matches": engine_matches,
+        "requirements": model_requirements(model, projectors=projectors, draft_models=draft_models),
         "registered_engines": registered,
         "default_engine": ready[0] if ready else None,
         "default_llama_version": default_llama_version,
@@ -2480,6 +2530,36 @@ async def model_preflight(model_id: str):
         "blockers": blockers,
         "can_deploy": bool(model.get("deployable") and ready and not blockers),
     }
+
+
+@app.get("/api/models/deployment-plan/{model_id}/{engine_key}")
+@app.get("/api/models/deployment-plan/{model_id}/{engine_key}/{profile_id}")
+async def model_deployment_plan(model_id: str, engine_key: str, profile_id: str = "default"):
+    """Return the server-resolved defaults for one model/engine pair."""
+
+    model = await asyncio.to_thread(catalog_service.find, model_id)
+    if not model:
+        raise HTTPException(404, "模型不存在或 model id 不唯一")
+    engine = _get_engine_by_key(engine_key)
+    if not engine:
+        raise HTTPException(404, f"引擎不存在: {engine_key}")
+    projectors_all = await asyncio.to_thread(_list_mmproj_files)
+    projectors = [
+        item for item in projectors_all
+        if item.get("relative_dir") == model.get("relative_dir")
+    ]
+    draft_models = _list_draft_models_for_model(model)
+    try:
+        return resolve_deployment_plan(
+            model,
+            engine,
+            profile_id=profile_id,
+            projectors=projectors,
+            draft_models=draft_models,
+        )
+    except DeploymentPlanError as exc:
+        status = 409 if exc.code in {"engine_model_mismatch", "mtp_not_supported", "vision_not_supported"} else 400
+        raise HTTPException(status, str(exc))
 
 @app.get("/api/models/recommend")
 async def recommend_model(filename: str = "", cache_type: str = "turbo3", v_cache_type: str = "", gpu_mode: str = "all"):
@@ -2988,6 +3068,93 @@ async def deploy_model(request: Request):
         raise HTTPException(400, f"llama_version 不存在或未注册: {llama_version!r}（可用引擎: {[e.get('key') for e in engines]}）")
     engine_record = _get_engine_by_key(llama_version) if engine == "llama" else None
     if engine == "llama":
+        # The resolver is the single source of truth for model/engine
+        # compatibility and profile defaults.  The legacy code below still
+        # renders the start script, but it receives the resolved values so a
+        # new engine does not need another set of frontend/backend rules.
+        plan_projectors_all, plan_draft_models = await asyncio.gather(
+            asyncio.to_thread(_list_mmproj_files),
+            asyncio.to_thread(_list_draft_models_for_model, model_record),
+        )
+        plan_projectors = [
+            item for item in plan_projectors_all
+            if item.get("relative_dir") == model_record.get("relative_dir")
+        ]
+        plan_parameter_keys = {
+            str(item.get("key"))
+            for item in (engine_record or {}).get("deployment_parameters", [])
+            if isinstance(item, dict) and str(item.get("key") or "").strip()
+        }
+        plan_overrides = {
+            key: data[key]
+            for key in plan_parameter_keys
+            if key in data
+        }
+        # These two selectors are catalog artifacts rather than llama.cpp
+        # flags, so they intentionally sit beside (not inside) the parameter
+        # file schema.
+        if "mmproj_file" in data:
+            plan_overrides["mmproj_file"] = data.get("mmproj_file")
+        if "draft_model_id" in data:
+            plan_overrides["draft_model_id"] = data.get("draft_model_id")
+        elif data.get("draft_model"):
+            plan_overrides["draft_model_id"] = data.get("draft_model")
+        try:
+            deployment_plan = resolve_deployment_plan(
+                model_record,
+                engine_record or {},
+                profile_id=profile_id,
+                overrides=plan_overrides,
+                projectors=plan_projectors,
+                draft_models=plan_draft_models,
+            )
+        except DeploymentPlanError as exc:
+            status = 409 if exc.code in {
+                "engine_model_mismatch", "mtp_not_supported", "vision_not_supported",
+                "draft_not_supported", "invalid_draft_model", "invalid_projector",
+                "spec_type_not_supported", "ngram_not_supported",
+            } else 400
+            raise HTTPException(status, str(exc))
+        resolved_parameters = deployment_plan.get("parameters", {})
+        if isinstance(resolved_parameters, dict):
+            # Do not overwrite explicit request values.  Defaults/profile
+            # values are inserted only for fields omitted by the caller.
+            for key, value in resolved_parameters.items():
+                data.setdefault(key, value)
+            # Re-read every value that the script builder consumes.  This is
+            # what makes the resolver authoritative even for legacy callers.
+            ctx_size = data.get("ctx_size", ctx_size)
+            ngl = data.get("ngl", ngl)
+            concurrency = data.get("concurrency", concurrency)
+            mmproj_raw = data.get("mmproj")
+            mmproj = mmproj_raw is True or str(mmproj_raw).lower() in {"1", "true", "on", "yes"}
+            mmproj_file = str(data.get("mmproj_file", "") or "").strip()
+            k_cache_type = data.get("k_cache_type", k_cache_type)
+            v_cache_type = data.get("v_cache_type", v_cache_type)
+            flash_attn = data.get("flash_attn", flash_attn)
+            batch = data.get("batch", batch)
+            ubatch = data.get("ubatch", ubatch)
+            threads = data.get("threads", threads)
+            spec_draft_n_max = data.get("spec_draft_n_max", spec_draft_n_max)
+            spec_type = data.get("spec_type", spec_type)
+            ngram_mod_n_min = data.get("ngram_mod_n_min", ngram_mod_n_min)
+            ngram_mod_n_max = data.get("ngram_mod_n_max", ngram_mod_n_max)
+            ngram_mod_n_match = data.get("ngram_mod_n_match", ngram_mod_n_match)
+            draft_k_cache_type = data.get("draft_k_cache_type", draft_k_cache_type)
+            draft_v_cache_type = data.get("draft_v_cache_type", draft_v_cache_type)
+            draft_model_ref = str(data.get("draft_model_id") or data.get("draft_model") or "").strip()
+            cache_ram = data.get("cache_ram", cache_ram)
+            sleep_idle_seconds = data.get("sleep_idle_seconds", sleep_idle_seconds)
+            no_mmap = data.get("no_mmap", no_mmap)
+            use_mlock = data.get("use_mlock", use_mlock)
+            numa = data.get("numa", numa)
+            poll_batch = data.get("poll_batch", poll_batch)
+            device = str(data.get("device", device) or "").strip()
+            fit = str(data.get("fit", fit) or "").strip().lower()
+            kv_unified_raw = data.get("kv_unified", kv_unified)
+            kv_unified = kv_unified_raw is True or str(kv_unified_raw).lower() in {"1", "true", "on", "yes"}
+            cache_reuse_raw = data.get("cache_reuse", cache_reuse_raw)
+            spec_draft_p_min_raw = data.get("spec_draft_p_min", spec_draft_p_min_raw)
         _validate_canonical_parameters(engine_record or {}, canonical_parameters)
         # The normalized deployment schema is the allow-list for optional
         # engine flags. Common flags are available to all compatible binaries;
@@ -3207,7 +3374,7 @@ async def deploy_model(request: Request):
     lines.extend(generic_exports)
     tensor_split_line = (f"  --tensor-split {tensor_split} --main-gpu 0 \\") if tensor_split else ""
     spec_params = ""
-    is_mtp_model = "MTP" in (model_record.get("classification", {}).get("capabilities") or [])
+    is_mtp_model = bool(model_requirements(model_record).get("mtp"))
     # The drawer submits "none" when both checkboxes are clear.  Keep the
     # backend default equally conservative: only a detected MTP model gets
     # automatic draft-mtp; n-gram is opt-in for all models.

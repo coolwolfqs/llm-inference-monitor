@@ -2,6 +2,7 @@
   "schema_version": 2,
   "extends": "../common/deployment-parameters.json",
   "runtime_type": "llama",
+  "match": {"formats": ["GGUF"]},
   "notes": [
     "主线 Vulkan/RADV 引擎，设备默认为 Vulkan0。",
     "参数目录与 ROCm 共用；后端差异通过设备、驱动和 profile 表达。"

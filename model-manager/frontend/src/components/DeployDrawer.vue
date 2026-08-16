@@ -83,9 +83,12 @@ const form = reactive<DeployPayload>({
 })
 
 const selectedEngine = computed(() => engines.value.find((item) => item.key === form.llama_version))
+const engineMatches = computed(() => preflight.value?.engine_matches || [])
+const selectedEngineMatch = computed(() => engineMatches.value.find((item) => item.key === form.llama_version))
 const engineSupportsMtp = computed(() => Boolean(
-  selectedEngine.value?.supports_mtp
-  ?? selectedEngine.value?.version_params?.spec_draft_n_max,
+  selectedEngineMatch.value?.capabilities.includes('mtp')
+  || selectedEngine.value?.supports_mtp
+  || selectedEngine.value?.version_params?.spec_draft_n_max,
 ))
 const mtpAvailable = computed(() => supportsMtp && engineSupportsMtp.value)
 const engineSupportsDraft = computed(() => Boolean(selectedEngine.value?.supports_draft_model))
@@ -100,12 +103,19 @@ const draftCacheTypes = computed(() => {
   return values?.length ? values : cacheTypes.value
 })
 const engineParameterSchema = computed(() => selectedEngine.value?.deployment_parameters || selectedEngine.value?.parameter_schema || [])
-const engineRecommendedParams = computed(() => selectedEngine.value?.recommended_params || {})
+const serverProfile = computed(() => selectedEngineMatch.value?.profiles?.[profileId.value])
+const engineRecommendedParams = computed(() => serverProfile.value?.parameters || selectedEngine.value?.recommended_params || {})
 const engineDifferences = computed(() => Object.entries(selectedEngine.value?.parameter_differences || {}))
 const supportedEngineParameterCount = computed(() => engineParameterSchema.value.filter((parameter) => parameter.supported !== false).length)
-const engineProfiles = computed(() => selectedEngine.value?.profiles || {})
-const profileOptions = computed(() => Object.entries(engineProfiles.value))
+const engineProfiles = computed(() => selectedEngineMatch.value?.profiles || selectedEngine.value?.profiles || {})
+const profileOptions = computed(() => Object.entries(engineProfiles.value).filter(([, profile]) => profile.compatible !== false))
 const selectedProfile = computed(() => engineProfiles.value[profileId.value])
+const visibleContextOptions = computed(() => {
+  const limit = Number(serverProfile.value?.limits?.ctx_size_max || 0)
+  const options = contextOptions.filter((size) => !limit || size <= limit)
+  const current = Number(form.ctx_size || 0)
+  return current && !options.includes(current) ? [...options, current].sort((a, b) => a - b) : options
+})
 const selectedProfileLabel = computed(() => selectedProfile.value?.label || (profileId.value === 'default' ? '最佳默认' : profileId.value))
 const contextLabel = computed(() => {
   const size = Number(form.ctx_size || 0)
@@ -207,6 +217,7 @@ const managedFormAliases: Record<string, string> = {
   v_cache_type: 'v_cache_type',
   draft_k_cache_type: 'draft_k_cache_type',
   draft_v_cache_type: 'draft_v_cache_type',
+  spec_type: 'spec_type',
   spec_draft_n_max: 'spec_draft_n_max',
   spec_draft_p_min: 'spec_draft_p_min',
   ngram_mod_n_min: 'ngram_mod_n_min',
@@ -221,6 +232,7 @@ const managedFormAliases: Record<string, string> = {
   fit: 'fit',
   kv_unified: 'kv_unified',
   cache_reuse: 'cache_reuse',
+  mmproj: 'mmproj',
 }
 
 function normalizeFormDefault(key: string, value: unknown) {
@@ -241,7 +253,8 @@ function applyEngineProfile() {
   form.spec_draft_p_min = undefined
 
   const profile = engineProfiles.value[profileId.value]
-  const profileValues = profile?.parameters || profile?.values || {}
+  const rawProfileValues = profile?.parameters || profile?.values || {}
+  const profileValues = serverProfile.value?.parameters || rawProfileValues
   const recommended = { ...engineRecommendedParams.value, ...profileValues }
   form.profile_id = profileId.value
   const formRecord = form as unknown as Record<string, unknown>
@@ -264,11 +277,17 @@ function applyEngineProfile() {
     if (value !== undefined && value !== null) parameterValues[parameter.key] = value
     else delete parameterValues[parameter.key]
   }
+  const resolvedMmproj = (recommended.mmproj_file ?? form.mmproj_file) as unknown
+  if (typeof resolvedMmproj === 'string' && resolvedMmproj) {
+    const projector = projectorForValue(resolvedMmproj)
+    if (projector) form.mmproj_file = projector.id
+  }
+  if (recommended.mmproj !== undefined) form.mmproj = Boolean(recommended.mmproj)
 }
 
 function rememberedConfigKey(engine = form.llama_version) {
   if (!engine) return ''
-  return `model-manager:deploy-config:v2:${encodeURIComponent(props.model.id)}:${encodeURIComponent(engine)}`
+  return `model-manager:deploy-config:v3:${encodeURIComponent(props.model.id)}:${encodeURIComponent(engine)}`
 }
 
 function readRememberedConfig(engine = form.llama_version): RememberedDeployConfig | undefined {
@@ -418,7 +437,8 @@ onMounted(async () => {
   try {
     const [check, available, companions] = await Promise.all([api.preflight(props.model.id), api.engines(), api.projectors(props.model.id)])
     preflight.value = check
-    engines.value = available.filter((item) => item.type !== 'vllm')
+    const compatibleKeys = new Set(check.compatible_llama_versions || check.engine_matches?.filter((item) => item.compatible).map((item) => item.key) || [])
+    engines.value = available.filter((item) => item.type !== 'vllm' && compatibleKeys.has(item.key))
     projectors.value = companions
     normalizeProjectorSelection(companions)
     form.engine = check.default_engine || check.compatible_engines[0] || 'llama'
@@ -484,7 +504,7 @@ async function submit() {
         <div v-else-if="preflight" class="preflight" :class="preflight.can_deploy ? 'ready' : 'blocked'">
           <CheckCircle2 v-if="preflight.can_deploy" :size="19" />
           <XCircle v-else :size="19" />
-          <div><strong>{{ preflight.can_deploy ? '预检通过' : '当前不可部署' }}</strong><p>{{ preflight.can_deploy ? `兼容引擎：${preflight.compatible_engines.join(', ')}` : preflight.blockers.join('；') }}</p></div>
+          <div><strong>{{ preflight.can_deploy ? '预检通过' : '当前不可部署' }}</strong><p>{{ preflight.can_deploy ? `兼容引擎：${(preflight.compatible_llama_versions || preflight.compatible_engines).join(', ')}` : preflight.blockers.join('；') }}</p></div>
         </div>
 
         <section class="form-section">
@@ -508,6 +528,7 @@ async function submit() {
               <p v-if="selectedEngine.binary_path">二进制：<code>{{ selectedEngine.binary_path }}</code></p>
               <p v-if="selectedEngine.parameter_file">参数文件：<code>{{ selectedEngine.parameter_file }}</code></p>
               <p v-if="selectedEngine.load_strategy?.default">加载：{{ selectedEngine.load_strategy.default.load_mode || '默认' }}<span v-if="selectedEngine.load_strategy.default.fit"> · Fit {{ selectedEngine.load_strategy.default.fit }}</span><span v-if="selectedEngine.load_strategy.default.kv_cache"> · KV {{ selectedEngine.load_strategy.default.kv_cache }}</span></p>
+              <p v-if="selectedEngineMatch?.warnings?.length">匹配提示：{{ selectedEngineMatch.warnings.join('；') }}</p>
               <p>共性 {{ supportedEngineParameterCount - (selectedEngine.exclusive_parameters?.length || 0) }} 项 · 拓展 {{ selectedEngine.exclusive_parameters?.length || 0 }} 项</p>
               <div v-if="engineDifferences.length" class="engine-parameter-list">
                 <span v-for="([key, difference]) in engineDifferences" :key="key" :title="difference.reason">{{ key }}：{{ difference.recommended }}</span>
@@ -519,7 +540,7 @@ async function submit() {
         <section class="form-section">
           <h3>2. 基础配置</h3>
           <div class="form-grid">
-            <label><span>上下文大小</span><select v-model.number="form.ctx_size"><option v-for="size in contextOptions" :key="size" :value="size">{{ size >= 1048576 ? '1024K' : `${size / 1024}K` }}</option></select></label>
+            <label><span>上下文大小</span><select v-model.number="form.ctx_size"><option v-for="size in visibleContextOptions" :key="size" :value="size">{{ size >= 1048576 ? '1024K' : `${size / 1024}K` }}</option></select><small v-if="serverProfile?.limits?.ctx_size_max">上限 {{ Math.round(Number(serverProfile.limits.ctx_size_max) / 1024) }}K（模型 × 引擎）</small></label>
             <label><span>并发数</span><select v-model.number="form.concurrency"><option v-for="n in 4" :key="n" :value="n">{{ n }}</option></select></label>
           </div>
           <p class="section-default">默认：按模型能力 × 引擎推荐 profile 生成；已保存的本模型配置优先恢复。</p>

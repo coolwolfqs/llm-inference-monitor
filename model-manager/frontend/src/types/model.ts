@@ -125,6 +125,8 @@ export interface Engine {
   profiles?: Record<string, {
     label?: string
     description?: string
+    compatible?: boolean
+    limits?: { ctx_size_max?: number; [key: string]: unknown }
     parameters?: Record<string, unknown>
     values?: Record<string, unknown>
   }>
@@ -136,6 +138,7 @@ export interface Engine {
     [key: string]: unknown
   }
   engine_environment?: Record<string, unknown>
+  capabilities?: string[]
 }
 
 export interface EngineParameter {
@@ -186,6 +189,42 @@ export interface Preflight {
   default_llama_version?: string
   draft_models?: ModelArtifact[]
   projectors?: ProjectionArtifact[]
+  requirements?: Record<string, unknown>
+  engine_matches?: EngineMatch[]
+}
+
+export interface EngineMatchProfile {
+  label?: string
+  compatible?: boolean
+  parameters?: Record<string, unknown>
+  values?: Record<string, unknown>
+  limits?: { ctx_size_max?: number; [key: string]: unknown }
+  reasons?: string[]
+}
+
+export interface EngineMatch {
+  key: string
+  name?: string
+  version?: string
+  compatible: boolean
+  reasons: string[]
+  warnings: string[]
+  capabilities: string[]
+  recommended_profile?: string | null
+  profiles?: Record<string, EngineMatchProfile>
+}
+
+export interface DeploymentPlan {
+  schema_version: number
+  model: Record<string, unknown>
+  engine: { key: string; type: string; version?: string; parameter_file?: string }
+  match: { compatible: boolean; reasons: string[]; warnings: string[]; capabilities: string[] }
+  profile_id: string
+  profile: Record<string, unknown>
+  parameters: Record<string, unknown>
+  parameter_schema: EngineParameter[]
+  limits: { ctx_size_max?: number; [key: string]: unknown }
+  artifacts: { projectors: ProjectionArtifact[]; draft_models: ModelArtifact[] }
 }
 
 export interface DeployPayload {

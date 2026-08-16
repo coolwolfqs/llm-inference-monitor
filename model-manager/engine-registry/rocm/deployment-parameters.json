@@ -2,6 +2,7 @@
   "schema_version": 2,
   "extends": "../common/deployment-parameters.json",
   "runtime_type": "llama",
+  "match": {"formats": ["GGUF"]},
   "notes": [
     "ROCm 主线引擎，设备默认为 ROCm0。",
     "模型、草稿模型和视觉投影文件均从 /data/models 解析；二进制路径只接受 VERSION.json。"

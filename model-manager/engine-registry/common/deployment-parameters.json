@@ -3,7 +3,8 @@
   "runtime_type": "llama",
   "notes": [
     "公共参数目录来自 llama.cpp llama-server --help；引擎文件只覆盖能力、默认值和 profile。",
-    "q8_0 是模型中心的 KV Cache 默认值，实际可选值仍以二进制探测结果为准。"
+    "q8_0 是模型中心的 KV Cache 默认值，实际可选值仍以二进制探测结果为准。",
+    "引擎文件可用 match.formats、match.architectures、match.architecture_types、match.quantizations、match.max_context 和 capability 约束参与模型匹配。"
   ],
   "parameters": [
     {"key":"ctx_size","label":"上下文大小","type":"integer","flag":"--ctx-size","min":4096,"max":1048576,"default":131072,"group":"基础","managed":true},

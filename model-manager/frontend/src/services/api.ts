@@ -1,4 +1,4 @@
-import type { DeployPayload, Engine, ModelsResponse, Operation, Preflight, ProjectionArtifact } from '../types/model'
+import type { DeploymentPlan, DeployPayload, Engine, ModelsResponse, Operation, Preflight, ProjectionArtifact } from '../types/model'
 
 const base = '/model-manager/api'
 
@@ -44,6 +44,9 @@ export const api = {
       throw cause
     }
   },
+  deploymentPlan: (modelId: string, engineKey: string, profileId = 'default') => request<DeploymentPlan>(
+    `/models/deployment-plan/${encodeURIComponent(modelId)}/${encodeURIComponent(engineKey)}/${encodeURIComponent(profileId)}`,
+  ),
   projectors: async (id: string) => {
     try {
       return (await request<{ files: ProjectionArtifact[] }>(`/models/mmproj-files/${encodeURIComponent(id)}`)).files

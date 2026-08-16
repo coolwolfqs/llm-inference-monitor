@@ -2,6 +2,7 @@
   "schema_version": 2,
   "extends": "../common/deployment-parameters.json",
   "runtime_type": "llama",
+  "match": {"formats": ["GGUF"]},
   "notes": [
     "Strix Halo Vulkan 分支，针对 gfx1151/RADV 提供 MoE 和 MTP 调优。",
     "分支没有新增公开 llama-server CLI 命名空间；差异来自编译内核、环境开关和推荐 profile。",
