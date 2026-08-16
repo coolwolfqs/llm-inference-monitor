@@ -13,7 +13,7 @@ const draftModels = computed(() => preflight.value?.draft_models || [])
 const loading = ref(true)
 const submitting = ref(false)
 const error = ref('')
-const supportsMtp = props.model.tags.includes('MTP')
+const supportsMtp = props.model.tags.some((item) => item.toLowerCase() === 'mtp')
   || (props.model.classification?.capabilities || []).some((item) => item.toLowerCase() === 'mtp')
 const contextOptions = [32768, 65536, 131072, 196608, 262144, 524288, 1048576]
 const fallbackCacheTypes = ['f32', 'f16', 'bf16', 'q8_0', 'q4_0', 'q4_1', 'iq4_nl', 'q5_0', 'q5_1']
@@ -86,13 +86,14 @@ const selectedEngine = computed(() => engines.value.find((item) => item.key === 
 const engineMatches = computed(() => preflight.value?.engine_matches || [])
 const selectedEngineMatch = computed(() => engineMatches.value.find((item) => item.key === form.llama_version))
 const engineSupportsMtp = computed(() => Boolean(
-  selectedEngineMatch.value?.capabilities.includes('mtp')
+  (selectedEngineMatch.value?.capabilities || []).includes('mtp')
   || selectedEngine.value?.supports_mtp
   || selectedEngine.value?.version_params?.spec_draft_n_max,
 ))
 const mtpAvailable = computed(() => supportsMtp && engineSupportsMtp.value)
 const engineSupportsDraft = computed(() => Boolean(selectedEngine.value?.supports_draft_model))
 const draftAvailable = computed(() => engineSupportsDraft.value && draftModels.value.length > 0)
+const ngramAvailable = computed(() => Boolean(selectedEngine.value && selectedEngine.value.supports_ngram !== false))
 const showDraftCache = computed(() => Boolean(mtpEnabled.value || form.draft_model_id))
 const cacheTypes = computed(() => {
   const values = selectedEngine.value?.cache_types
@@ -156,14 +157,12 @@ const speculationMode = computed<'none' | 'mtp' | 'ngram' | 'mtp_ngram'>({
   },
 })
 const speculationModeOptions = computed(() => {
-  const options: Array<{ value: 'none' | 'mtp' | 'ngram' | 'mtp_ngram'; label: string }> = [
+  const options: Array<{ value: 'none' | 'mtp' | 'ngram' | 'mtp_ngram'; label: string; disabled?: boolean }> = [
     { value: 'none', label: '关闭投机解码' },
   ]
-  if (mtpAvailable.value) options.push({ value: 'mtp', label: 'MTP（模型内置草稿）' })
-  if (selectedEngine.value?.supports_ngram !== false) options.push({ value: 'ngram', label: 'n-gram' })
-  if (mtpAvailable.value && selectedEngine.value?.supports_ngram !== false) {
-    options.push({ value: 'mtp_ngram', label: 'MTP + n-gram' })
-  }
+  options.push({ value: 'mtp', label: mtpAvailable.value ? 'MTP（模型内置草稿）' : 'MTP（当前不可用）', disabled: !mtpAvailable.value })
+  options.push({ value: 'ngram', label: ngramAvailable.value ? 'n-gram' : 'n-gram（当前不可用）', disabled: !ngramAvailable.value })
+  options.push({ value: 'mtp_ngram', label: 'MTP + n-gram', disabled: !mtpAvailable.value || !ngramAvailable.value })
   return options
 })
 
@@ -552,7 +551,7 @@ async function submit() {
             </div>
             <label class="full-field"><span>视觉模型</span><select v-model="form.mmproj_file"><option value="">不加载视觉模型</option><option v-for="projector in projectors" :key="projector.id" :value="projector.id">{{ projector.name }} · {{ Math.round(projector.size / 1024 / 1024) }}MB</option></select><small>{{ projectors.length ? '仅展示当前模型目录的匹配项，默认选择最佳匹配' : '当前模型目录没有可匹配的视觉模型' }}</small></label>
             <div class="form-grid enhancement-params">
-              <label><span>投机解码</span><select v-model="speculationMode"><option v-for="option in speculationModeOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select><small>{{ supportsMtp ? '模型已识别 MTP，默认 MTP' : '模型未识别 MTP，默认关闭' }}</small></label>
+<label><span>投机解码</span><select v-model="speculationMode"><option v-for="option in speculationModeOptions" :key="option.value" :value="option.value" :disabled="option.disabled">{{ option.label }}</option></select><small>{{ supportsMtp ? '模型已识别 MTP，默认 MTP' : '模型未识别 MTP，默认关闭' }}</small></label>
               <label v-if="mtpEnabled || form.draft_model_id"><span>预测 token 数</span><input v-model.number="form.spec_draft_n_max" type="number" min="1" max="32" /></label>
               <label v-if="(mtpEnabled || form.draft_model_id) && supportsEngineParameter('spec_draft_p_min')"><span>接受阈值</span><input v-model.number="form.spec_draft_p_min" type="number" min="0" max="1" step="0.01" /><small>推荐 {{ recommendedValue({ key: 'spec_draft_p_min' }) }}</small></label>
               <label v-if="ngramEnabled"><span>n-gram 匹配长度</span><input v-model.number="form.ngram_mod_n_match" type="number" min="1" max="256" /></label>
