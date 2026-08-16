@@ -232,8 +232,9 @@ def resolve_deployment_plan(
     if profiles and selected_profile not in profiles:
         raise DeploymentPlanError(f"引擎 profile 不存在: {selected_profile}", code="unknown_profile")
     profile = profiles.get(selected_profile) if isinstance(profiles, dict) else {}
+    profile_values = _profile_values(profile)
     values = _parameter_defaults(engine, model)
-    values.update(_profile_values(profile))
+    values.update(profile_values)
     overrides = dict(overrides or {})
     values.update({str(key): value for key, value in overrides.items() if str(key).strip()})
 
@@ -256,7 +257,19 @@ def resolve_deployment_plan(
 
     context_limit = capabilities["max_context"] or 1048576
     if requirements["context_length"]:
-        context_limit = min(context_limit, requirements["context_length"])
+        # llama-server's ctx-size is the total scheduler budget.  A model
+        # advertised as 256K can therefore be tried at 512K with two slots;
+        # each sequence still stays within the model's native 256K window.
+        try:
+            requested_concurrency = max(1, int(values.get("concurrency") or 1))
+        except (TypeError, ValueError):
+            raise DeploymentPlanError("并发数必须是整数", code="invalid_concurrency")
+        context_limit = min(context_limit, requirements["context_length"] * requested_concurrency)
+        # A profile that did not explicitly choose a context should follow
+        # the scheduler capacity of its concurrency instead of remaining at
+        # the single-slot model limit.
+        if "ctx_size" not in overrides and "ctx_size" not in profile_values:
+            values["ctx_size"] = context_limit
     try:
         requested_context = int(values.get("ctx_size") or context_limit)
     except (TypeError, ValueError):

@@ -40,7 +40,7 @@ def _model(**overrides):
         "role": "model",
         "deployable": True,
         "supported_engines": ["llama"],
-        "classification": {"context_length": 524288, "capabilities": ["MTP"]},
+        "classification": {"context_length": 262144, "capabilities": ["MTP"]},
     }
     model.update(overrides)
     return model
@@ -67,6 +67,16 @@ class DeploymentResolverTests(unittest.TestCase):
             _engine(),
         )
         self.assertEqual(plan["parameters"]["spec_type"], "draft-mtp")
+
+    def test_two_slots_expand_total_context_budget(self):
+        plan = resolve_deployment_plan(
+            _model(classification={"context_length": 262144, "capabilities": []}),
+            _engine(profiles={"concurrent_2": {"parameters": {"concurrency": 2}}}),
+            profile_id="concurrent_2",
+        )
+        self.assertEqual(plan["parameters"]["concurrency"], 2)
+        self.assertEqual(plan["parameters"]["ctx_size"], 524288)
+        self.assertEqual(plan["limits"]["ctx_size_max"], 524288)
 
     def test_vision_projector_is_selected_only_from_same_bundle(self):
         model = _model(classification={"context_length": 262144, "capabilities": ["Vision"]}, relative_dir="bundle")
@@ -105,6 +115,13 @@ class DeploymentResolverTests(unittest.TestCase):
         with self.assertRaises(DeploymentPlanError) as raised:
             resolve_deployment_plan(_model(), _engine(), overrides={"ctx_size": 1048576})
         self.assertEqual(raised.exception.code, "context_exceeds_limit")
+
+        plan = resolve_deployment_plan(
+            _model(),
+            _engine(),
+            overrides={"ctx_size": 524288, "concurrency": 2},
+        )
+        self.assertEqual(plan["limits"]["ctx_size_max"], 524288)
 
     def test_explicit_unsupported_spec_type_is_rejected(self):
         with self.assertRaises(DeploymentPlanError) as raised:

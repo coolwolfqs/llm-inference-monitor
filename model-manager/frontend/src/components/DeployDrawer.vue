@@ -111,9 +111,18 @@ const supportedEngineParameterCount = computed(() => engineParameterSchema.value
 const engineProfiles = computed(() => selectedEngineMatch.value?.profiles || selectedEngine.value?.profiles || {})
 const profileOptions = computed(() => Object.entries(engineProfiles.value).filter(([, profile]) => profile.compatible !== false))
 const selectedProfile = computed(() => engineProfiles.value[profileId.value])
+const contextPerSlotLimit = computed(() => {
+  const modelLimit = Number(preflight.value?.requirements?.context_length || 0)
+  const profileLimits = Object.values(engineProfiles.value).map((profile) => {
+    const slots = Math.max(1, Number(profile.parameters?.concurrency || 1))
+    const total = Number(profile.limits?.ctx_size_max || 0)
+    return total > 0 ? total / slots : 0
+  }).filter((value) => value > 0)
+  return modelLimit || (profileLimits.length ? Math.max(...profileLimits) : 1048576)
+})
+const contextLimit = computed(() => Math.min(1048576, contextPerSlotLimit.value * Math.max(1, Number(form.concurrency || 1))))
 const visibleContextOptions = computed(() => {
-  const limit = Number(serverProfile.value?.limits?.ctx_size_max || 0)
-  const options = contextOptions.filter((size) => !limit || size <= limit)
+  const options = contextOptions.filter((size) => size <= contextLimit.value)
   const current = Number(form.ctx_size || 0)
   return current && !options.includes(current) ? [...options, current].sort((a, b) => a - b) : options
 })
@@ -122,6 +131,11 @@ const contextLabel = computed(() => {
   const size = Number(form.ctx_size || 0)
   return size >= 1048576 ? '1024K' : size >= 1024 ? `${Math.round(size / 1024)}K` : String(size)
 })
+
+function clampContextToConcurrency() {
+  const current = Number(form.ctx_size || 0)
+  if (current > contextLimit.value) form.ctx_size = contextLimit.value
+}
 
 const groupParameters = (predicate: (parameter: EngineParameter) => boolean) => {
   const groups = new Map<string, EngineParameter[]>()
@@ -286,7 +300,7 @@ function applyEngineProfile() {
 
 function rememberedConfigKey(engine = form.llama_version) {
   if (!engine) return ''
-  return `model-manager:deploy-config:v3:${encodeURIComponent(props.model.id)}:${encodeURIComponent(engine)}`
+  return `model-manager:deploy-config:v4:${encodeURIComponent(props.model.id)}:${encodeURIComponent(engine)}`
 }
 
 function readRememberedConfig(engine = form.llama_version): RememberedDeployConfig | undefined {
@@ -428,6 +442,8 @@ watch(() => form.draft_model_id, (value) => {
   if (value) mtpEnabled.value = false
 }, { flush: 'sync' })
 
+watch(() => form.concurrency, clampContextToConcurrency, { flush: 'sync' })
+
 watch(form, persistRememberedConfig, { deep: true })
 watch(parameterValues, persistRememberedConfig, { deep: true })
 watch([mtpEnabled, ngramEnabled, profileId], persistRememberedConfig, { flush: 'sync' })
@@ -507,7 +523,7 @@ async function submit() {
         </div>
 
         <section class="form-section">
-          <h3>1. 引擎选择 <span class="section-note">模型 → 引擎 → 调度</span></h3>
+          <h3>引擎选择 <span class="section-note">模型 → 引擎 → 调度</span></h3>
           <div class="deploy-flow">
             <div><small>模型</small><strong>{{ model.family || model.alias || model.name }}</strong><span>{{ model.format || 'GGUF' }} · {{ model.size_human }}</span></div>
             <b>→</b>
@@ -537,9 +553,9 @@ async function submit() {
         </section>
 
         <section class="form-section">
-          <h3>2. 基础配置</h3>
+          <h3>基础配置</h3>
           <div class="form-grid">
-            <label><span>上下文大小</span><select v-model.number="form.ctx_size"><option v-for="size in visibleContextOptions" :key="size" :value="size">{{ size >= 1048576 ? '1024K' : `${size / 1024}K` }}</option></select><small v-if="serverProfile?.limits?.ctx_size_max">上限 {{ Math.round(Number(serverProfile.limits.ctx_size_max) / 1024) }}K（模型 × 引擎）</small></label>
+            <label><span>上下文大小</span><select v-model.number="form.ctx_size"><option v-for="size in visibleContextOptions" :key="size" :value="size">{{ size >= 1048576 ? '1024K' : `${size / 1024}K` }}</option></select><small>上限 {{ Math.round(contextLimit / 1024) }}K（模型窗口 × 并发数）</small></label>
             <label><span>并发数</span><select v-model.number="form.concurrency"><option v-for="n in 4" :key="n" :value="n">{{ n }}</option></select></label>
           </div>
           <p class="section-default">默认：按模型能力 × 引擎推荐 profile 生成；已保存的本模型配置优先恢复。</p>
@@ -561,7 +577,7 @@ async function submit() {
         </section>
 
         <details class="advanced-panel">
-          <summary>3. 高级参数（共性） <ChevronDown :size="16" /></summary>
+          <summary>高级参数（共性） <ChevronDown :size="16" /></summary>
           <p class="parameter-panel-help">这里仅放所有引擎通用的性能、KV Cache、加载和服务参数；不支持的字段会自动隐藏。</p>
           <div class="form-grid advanced-grid">
             <label><span>K Cache</span><select v-model="form.k_cache_type"><option v-for="v in cacheTypes" :key="v" :value="v">{{ v }}</option></select></label>
@@ -608,7 +624,7 @@ async function submit() {
           </section>
         </details>
         <details class="advanced-panel engine-parameters-panel">
-          <summary>4. 拓展配置（引擎/模型） <ChevronDown :size="16" /></summary>
+          <summary>拓展配置（引擎/模型） <ChevronDown :size="16" /></summary>
           <p class="parameter-panel-help">这里仅显示当前引擎或模型专属参数；新增引擎优先通过参数文件扩展，不改变共性页面结构。</p>
           <template v-if="extensionParameterGroups.length">
             <section v-for="group in extensionParameterGroups" :key="group.name" class="parameter-group">
