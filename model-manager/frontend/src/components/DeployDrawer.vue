@@ -86,16 +86,49 @@ const supportedEngineParameterCount = computed(() => engineParameterSchema.value
 const engineProfiles = computed(() => selectedEngine.value?.profiles || {})
 const profileOptions = computed(() => Object.entries(engineProfiles.value))
 
-const dynamicParameterGroups = computed(() => {
+const groupParameters = (predicate: (parameter: EngineParameter) => boolean) => {
   const groups = new Map<string, EngineParameter[]>()
   for (const parameter of engineParameterSchema.value) {
-    if (parameter.supported === false || parameter.managed || !isParameterVisible(parameter)) continue
+    if (!predicate(parameter) || !isParameterVisible(parameter)) continue
     const group = parameter.group || '引擎参数'
     const values = groups.get(group) || []
     values.push(parameter)
     groups.set(group, values)
   }
   return Array.from(groups.entries()).map(([name, parameters]) => ({ name, parameters }))
+}
+
+// Common non-managed parameters belong to the shared advanced section. Only
+// descriptors explicitly marked common:false are rendered as extensions.
+const advancedParameterGroups = computed(() => groupParameters((parameter) => (
+  parameter.supported !== false && !parameter.managed && parameter.common !== false
+)))
+const extensionParameterGroups = computed(() => groupParameters((parameter) => (
+  parameter.supported !== false && !parameter.managed && parameter.common === false
+)))
+
+const speculationMode = computed<'none' | 'mtp' | 'ngram' | 'mtp_ngram'>({
+  get() {
+    if (mtpEnabled.value && ngramEnabled.value) return 'mtp_ngram'
+    if (mtpEnabled.value) return 'mtp'
+    if (ngramEnabled.value) return 'ngram'
+    return 'none'
+  },
+  set(value) {
+    mtpEnabled.value = value === 'mtp' || value === 'mtp_ngram'
+    ngramEnabled.value = value === 'ngram' || value === 'mtp_ngram'
+  },
+})
+const speculationModeOptions = computed(() => {
+  const options: Array<{ value: 'none' | 'mtp' | 'ngram' | 'mtp_ngram'; label: string }> = [
+    { value: 'none', label: '关闭投机解码' },
+  ]
+  if (mtpAvailable.value) options.push({ value: 'mtp', label: 'MTP（模型内置草稿）' })
+  if (selectedEngine.value?.supports_ngram !== false) options.push({ value: 'ngram', label: 'n-gram' })
+  if (mtpAvailable.value && selectedEngine.value?.supports_ngram !== false) {
+    options.push({ value: 'mtp_ngram', label: 'MTP + n-gram' })
+  }
+  return options
 })
 
 function supportsEngineParameter(key: string) {
@@ -214,6 +247,10 @@ watch(engineSupportsMtp, (available) => {
   if (!available) mtpEnabled.value = false
 })
 
+watch(() => selectedEngine.value?.supports_ngram, (available) => {
+  if (available === false) ngramEnabled.value = false
+})
+
 watch(() => form.llama_version, (key) => {
   if (key) window.localStorage.setItem('model-manager:last-engine', key)
   if (key && engines.value.length) {
@@ -313,32 +350,7 @@ async function submit() {
         </div>
 
         <section class="form-section">
-          <h3>基础配置</h3>
-          <div class="form-grid">
-            <label><span>上下文大小</span><select v-model.number="form.ctx_size"><option v-for="size in contextOptions" :key="size" :value="size">{{ size >= 1048576 ? '1024K' : `${size / 1024}K` }}</option></select></label>
-            <label><span>并发数</span><select v-model.number="form.concurrency"><option v-for="n in 4" :key="n" :value="n">{{ n }}</option></select></label>
-            <label><span>GPU 层数</span><input v-model.number="form.ngl" type="number" min="1" max="99" /></label>
-            <label><span>GPU</span><input v-model="form.gpu" /></label>
-          </div>
-        </section>
-
-        <section class="form-section">
-          <h3>模型增强</h3>
-          <label class="full-field"><span>视觉投影组件</span><select v-model="form.mmproj_file"><option value="">不加载视觉组件</option><option v-for="projector in projectors" :key="projector.id" :value="projector.id">{{ projector.name }} · {{ Math.round(projector.size / 1024 / 1024) }}MB</option></select><small>{{ projectors.length ? '仅展示与当前主模型同包的视觉组件；可明确选择不加载' : '当前模型包没有可匹配的视觉组件，默认不加载' }}</small></label>
-          <div class="enhancement-grid">
-            <label class="check-card"><input v-model="mtpEnabled" type="checkbox" :disabled="!mtpAvailable || Boolean(form.draft_model_id)" /><span><strong>MTP 推测解码</strong><small>{{ mtpAvailable ? '使用模型自带草稿预测' : supportsMtp ? '当前引擎不支持 MTP，已默认关闭' : '当前模型未识别为 MTP，默认关闭' }}</small></span></label>
-            <label class="check-card"><input v-model="ngramEnabled" type="checkbox" :disabled="selectedEngine && selectedEngine.supports_ngram === false" /><span><strong>n-gram 加速</strong><small>匹配历史 token 序列，默认关闭</small></span></label>
-          </div>
-          <label v-if="draftModels.length || engineSupportsDraft" class="full-field draft-model-field"><span>外置草稿模型</span><select v-model="form.draft_model_id" :disabled="!draftAvailable || mtpEnabled"><option value="">不使用外置草稿模型</option><option v-for="draft in draftModels" :key="draft.id" :value="draft.id">{{ draft.name }} · {{ draft.size_human }}</option></select><small>{{ mtpEnabled ? '已启用 MTP 内置草稿层；如需外置草稿模型，请先取消 MTP' : draftAvailable ? '仅展示与当前主模型同包或同族的草稿组件' : '当前模型包未发现可用草稿模型，或所选引擎不支持 --model-draft' }}</small></label>
-          <div v-if="mtpEnabled || ngramEnabled" class="form-grid enhancement-params">
-            <label v-if="mtpEnabled"><span>Draft 预测数</span><input v-model.number="form.spec_draft_n_max" type="number" min="1" max="32" /></label>
-            <label v-if="mtpEnabled && supportsEngineParameter('spec_draft_p_min')"><span>Draft 接受阈值</span><input v-model.number="form.spec_draft_p_min" type="number" min="0" max="1" step="0.01" /><small>当前引擎推荐 {{ recommendedValue({ key: 'spec_draft_p_min' }) }}</small></label>
-            <label v-if="ngramEnabled"><span>ngram 查找长度</span><input v-model.number="form.ngram_mod_n_match" type="number" min="1" max="256" /></label>
-          </div>
-        </section>
-
-        <section class="form-section">
-          <h3>运行引擎</h3>
+          <h3>1. 引擎选择</h3>
           <label class="full-field"><span>llama.cpp 版本</span><select v-model="form.llama_version"><option v-for="engine in engines" :key="engine.key" :value="engine.key">{{ engine.name }} · {{ engine.version }}</option></select></label>
           <label v-if="profileOptions.length" class="full-field"><span>部署 profile</span><select v-model="profileId"><option v-for="([key, profile]) in profileOptions" :key="key" :value="key">{{ profile.label || key }}</option></select><small>profile 只覆盖推荐值，仍可继续调整公共参数。</small></label>
           <div v-if="selectedEngine" class="feature-row"><span v-for="feature in selectedEngine.features" :key="feature">{{ feature }}</span></div>
@@ -360,8 +372,27 @@ async function submit() {
           </div>
         </section>
 
+        <section class="form-section">
+          <h3>2. 基础配置</h3>
+          <div class="form-grid">
+            <label><span>上下文大小</span><select v-model.number="form.ctx_size"><option v-for="size in contextOptions" :key="size" :value="size">{{ size >= 1048576 ? '1024K' : `${size / 1024}K` }}</option></select></label>
+            <label><span>并发数</span><select v-model.number="form.concurrency"><option v-for="n in 4" :key="n" :value="n">{{ n }}</option></select></label>
+            <label><span>GPU 层数</span><input v-model.number="form.ngl" type="number" min="1" max="99" /></label>
+            <label><span>GPU</span><input v-model="form.gpu" /></label>
+          </div>
+          <label class="full-field"><span>视觉模型</span><select v-model="form.mmproj_file"><option value="">不加载视觉模型</option><option v-for="projector in projectors" :key="projector.id" :value="projector.id">{{ projector.name }} · {{ Math.round(projector.size / 1024 / 1024) }}MB</option></select><small>{{ projectors.length ? '仅展示与当前主模型同目录匹配的视觉模型；默认使用该目录首个匹配项，也可明确选择不加载' : '当前模型目录没有可匹配的视觉模型，默认不加载' }}</small></label>
+          <div class="form-grid enhancement-params">
+            <label><span>投机解码方式</span><select v-model="speculationMode"><option v-for="option in speculationModeOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select><small>{{ supportsMtp ? '已识别 MTP 模型，默认优先 MTP' : '未识别 MTP，默认关闭；可按需选择 n-gram' }}</small></label>
+            <label v-if="mtpEnabled || form.draft_model_id"><span>预测 token 数</span><input v-model.number="form.spec_draft_n_max" type="number" min="1" max="32" /></label>
+            <label v-if="(mtpEnabled || form.draft_model_id) && supportsEngineParameter('spec_draft_p_min')"><span>接受阈值</span><input v-model.number="form.spec_draft_p_min" type="number" min="0" max="1" step="0.01" /><small>当前引擎推荐 {{ recommendedValue({ key: 'spec_draft_p_min' }) }}</small></label>
+            <label v-if="ngramEnabled"><span>n-gram 匹配长度</span><input v-model.number="form.ngram_mod_n_match" type="number" min="1" max="256" /></label>
+          </div>
+          <label v-if="draftModels.length || engineSupportsDraft" class="full-field draft-model-field"><span>草稿模型</span><select v-model="form.draft_model_id" :disabled="!draftAvailable || mtpEnabled"><option value="">不使用外置草稿模型</option><option v-for="draft in draftModels" :key="draft.id" :value="draft.id">{{ draft.name }} · {{ draft.size_human }}</option></select><small>{{ mtpEnabled ? '当前使用 MTP 内置草稿层；如需外置草稿模型，请将投机解码方式切换为 n-gram 或关闭' : draftAvailable ? '仅展示与当前主模型同目录或同族的草稿模型' : '当前模型包未发现可用草稿模型，或所选引擎不支持外置草稿模型' }}</small></label>
+        </section>
+
         <details class="advanced-panel">
-          <summary>高级参数 <ChevronDown :size="16" /></summary>
+          <summary>3. 高级参数（共性） <ChevronDown :size="16" /></summary>
+          <p class="parameter-panel-help">这里仅放所有引擎通用的性能、KV Cache、加载和服务参数；不支持的字段会自动隐藏。</p>
           <div class="form-grid advanced-grid">
             <label><span>K Cache</span><select v-model="form.k_cache_type"><option v-for="v in cacheTypes" :key="v" :value="v">{{ v }}</option></select></label>
             <label><span>V Cache</span><select v-model="form.v_cache_type"><option v-for="v in cacheTypes" :key="v" :value="v">{{ v }}</option></select></label>
@@ -387,11 +418,7 @@ async function submit() {
             <label><input v-model="form.ui" type="checkbox" /><span>Web UI</span></label>
             <label v-if="supportsEngineParameter('kv_unified')"><input v-model="form.kv_unified" type="checkbox" /><span>统一 KV Cache（引擎推荐）</span></label>
           </div>
-        </details>
-        <details v-if="dynamicParameterGroups.length" class="advanced-panel engine-parameters-panel">
-          <summary>引擎参数与扩展设置 <ChevronDown :size="16" /></summary>
-          <p class="parameter-panel-help">以下字段由当前引擎目录的 deployment-parameters.json 生成；新增引擎只需补充配置文件，不需要修改页面。</p>
-          <section v-for="group in dynamicParameterGroups" :key="group.name" class="parameter-group">
+          <section v-for="group in advancedParameterGroups" :key="group.name" class="parameter-group">
             <h4>{{ group.name }}</h4>
             <div class="form-grid advanced-grid">
               <label v-for="parameter in group.parameters" :key="parameter.key" :title="parameterHint(parameter)">
@@ -409,6 +436,31 @@ async function submit() {
               </label>
             </div>
           </section>
+        </details>
+        <details class="advanced-panel engine-parameters-panel">
+          <summary>4. 拓展配置（引擎/模型） <ChevronDown :size="16" /></summary>
+          <p class="parameter-panel-help">这里仅显示当前引擎或模型专属参数；新增引擎优先通过参数文件扩展，不改变共性页面结构。</p>
+          <template v-if="extensionParameterGroups.length">
+            <section v-for="group in extensionParameterGroups" :key="group.name" class="parameter-group">
+              <h4>{{ group.name }}</h4>
+              <div class="form-grid advanced-grid">
+                <label v-for="parameter in group.parameters" :key="parameter.key" :title="parameterHint(parameter)">
+                  <template v-if="parameter.type === 'boolean'">
+                    <span class="parameter-toggle"><input v-model="parameterValues[parameter.key]" type="checkbox" /><span>{{ parameter.label || parameter.key }}</span></span>
+                  </template>
+                  <template v-else>
+                    <span>{{ parameter.label || parameter.key }}</span>
+                    <select v-if="(parameter.type === 'select' || parameter.type === 'multi-select') && parameter.values?.length" v-model="parameterValues[parameter.key]" :multiple="parameter.type === 'multi-select'">
+                      <option v-for="value in parameter.values" :key="value" :value="value">{{ value }}</option>
+                    </select>
+                    <input v-else v-model="parameterValues[parameter.key]" :type="inputType(parameter)" :min="parameter.min" :max="parameter.max" :step="parameter.step" :placeholder="parameter.placeholder" />
+                  </template>
+                  <small v-if="parameterHint(parameter)">{{ parameterHint(parameter) }}</small>
+                </label>
+              </div>
+            </section>
+          </template>
+          <p v-else class="parameter-panel-help">当前引擎没有额外拓展参数，使用上面的共性配置即可。</p>
         </details>
         <p v-if="error" class="form-error">{{ error }}</p>
       </div>
