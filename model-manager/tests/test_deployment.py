@@ -91,14 +91,15 @@ class DeploymentResolverTests(unittest.TestCase):
         plan = resolve_deployment_plan(_model(classification={"capabilities": []}), _engine())
         self.assertEqual(plan["parameters"]["spec_type"], "none")
 
-    def test_text_model_does_not_auto_load_a_bundle_projector(self):
+    def test_explicit_visual_disable_does_not_load_bundle_projector(self):
         plan = resolve_deployment_plan(
             _model(classification={"capabilities": []}, relative_dir="bundle"),
             _engine(),
+            overrides={"mmproj": False, "mmproj_file": ""},
             projectors=[{"id": "mmproj.gguf", "relative_dir": "bundle"}],
         )
         self.assertFalse(plan["parameters"].get("mmproj", False))
-        self.assertNotIn("mmproj_file", plan["parameters"])
+        self.assertEqual(plan["parameters"].get("mmproj_file"), "")
 
     def test_explicit_context_above_model_limit_is_rejected(self):
         with self.assertRaises(DeploymentPlanError) as raised:

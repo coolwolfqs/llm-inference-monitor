@@ -62,7 +62,7 @@ def model_requirements(
     capabilities = _capability_set(model)
     architecture = str(classification.get("architecture") or model.get("architecture") or "").strip().lower()
     architecture_type = str(classification.get("architecture_type") or model.get("architecture_type") or "").strip().lower()
-    context_length = classification.get("context_length", model.get("ctx_default"))
+    context_length = classification.get("context_length") or model.get("ctx_default")
     try:
         context_length = int(context_length) if context_length else None
     except (TypeError, ValueError):
@@ -194,7 +194,7 @@ def _profile_values(profile: dict[str, Any] | None) -> dict[str, Any]:
 
 def _parameter_defaults(engine: dict[str, Any], model: dict[str, Any]) -> dict[str, Any]:
     classification = model.get("classification") if isinstance(model.get("classification"), dict) else {}
-    model_context = classification.get("context_length", model.get("ctx_default"))
+    model_context = classification.get("context_length") or model.get("ctx_default")
     defaults: dict[str, Any] = {}
     if model_context:
         defaults["ctx_size"] = model_context
@@ -243,11 +243,13 @@ def resolve_deployment_plan(
         values["spec_type"] = "draft-mtp"
     elif "spec_type" not in overrides:
         values.setdefault("spec_type", "none")
+    explicit_projector = str(overrides.get("mmproj_file") or "").strip()
+    explicit_visual_disable = "mmproj" in overrides and not bool(overrides.get("mmproj"))
     if (
         projectors
         and capabilities["vision"]
-        and (requirements["vision"] or values.get("mmproj"))
-        and "mmproj_file" not in overrides
+        and not explicit_projector
+        and not explicit_visual_disable
     ):
         values["mmproj_file"] = str(projectors[0].get("id") or projectors[0].get("relative_path") or "")
         values["mmproj"] = bool(values["mmproj_file"])
