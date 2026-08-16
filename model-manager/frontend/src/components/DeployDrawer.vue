@@ -23,6 +23,26 @@ const mtpEnabled = ref(supportsMtp)
 const ngramEnabled = ref(false)
 const profileId = ref('default')
 const parameterValues = reactive<Record<string, unknown>>({})
+const restoringConfig = ref(false)
+const persistenceReady = ref(false)
+const restoredRememberedConfig = ref(false)
+
+const rememberedFormKeys = [
+  'ctx_size', 'ngl', 'gpu', 'concurrency', 'k_cache_type', 'v_cache_type',
+  'batch', 'ubatch', 'flash_attn', 'chunked_batch', 'threads', 'threads_http',
+  'temp', 'reasoning', 'ui', 'mmproj_file', 'draft_model_id', 'spec_draft_n_max',
+  'draft_k_cache_type', 'draft_v_cache_type', 'ngram_mod_n_min', 'ngram_mod_n_max',
+  'ngram_mod_n_match', 'cache_ram', 'sleep_idle_seconds', 'device', 'fit',
+  'kv_unified', 'cache_reuse', 'spec_draft_p_min',
+] as const
+
+type RememberedDeployConfig = {
+  profile_id?: string
+  mtp_enabled?: boolean
+  ngram_enabled?: boolean
+  form?: Record<string, unknown>
+  parameters?: Record<string, unknown>
+}
 
 const form = reactive<DeployPayload>({
   filename: props.model.id,
@@ -85,6 +105,12 @@ const engineDifferences = computed(() => Object.entries(selectedEngine.value?.pa
 const supportedEngineParameterCount = computed(() => engineParameterSchema.value.filter((parameter) => parameter.supported !== false).length)
 const engineProfiles = computed(() => selectedEngine.value?.profiles || {})
 const profileOptions = computed(() => Object.entries(engineProfiles.value))
+const selectedProfile = computed(() => engineProfiles.value[profileId.value])
+const selectedProfileLabel = computed(() => selectedProfile.value?.label || (profileId.value === 'default' ? '最佳默认' : profileId.value))
+const contextLabel = computed(() => {
+  const size = Number(form.ctx_size || 0)
+  return size >= 1048576 ? '1024K' : size >= 1024 ? `${Math.round(size / 1024)}K` : String(size)
+})
 
 const groupParameters = (predicate: (parameter: EngineParameter) => boolean) => {
   const groups = new Map<string, EngineParameter[]>()
@@ -167,6 +193,43 @@ function recommendedValue(parameter: EngineParameter) {
   return String(value)
 }
 
+const managedFormAliases: Record<string, string> = {
+  ctx_size: 'ctx_size',
+  ngl: 'ngl',
+  concurrency: 'concurrency',
+  batch: 'batch',
+  ubatch: 'ubatch',
+  threads: 'threads',
+  threads_http: 'threads_http',
+  flash_attn: 'flash_attn',
+  chunked_batch: 'chunked_batch',
+  k_cache_type: 'k_cache_type',
+  v_cache_type: 'v_cache_type',
+  draft_k_cache_type: 'draft_k_cache_type',
+  draft_v_cache_type: 'draft_v_cache_type',
+  spec_draft_n_max: 'spec_draft_n_max',
+  spec_draft_p_min: 'spec_draft_p_min',
+  ngram_mod_n_min: 'ngram_mod_n_min',
+  ngram_mod_n_max: 'ngram_mod_n_max',
+  ngram_mod_n_match: 'ngram_mod_n_match',
+  cache_ram: 'cache_ram',
+  sleep_idle_seconds: 'sleep_idle_seconds',
+  temp: 'temp',
+  reasoning: 'reasoning',
+  ui: 'ui',
+  device: 'device',
+  fit: 'fit',
+  kv_unified: 'kv_unified',
+  cache_reuse: 'cache_reuse',
+}
+
+function normalizeFormDefault(key: string, value: unknown) {
+  if (key === 'flash_attn') {
+    return value === true || String(value).toLowerCase() === 'on'
+  }
+  return value
+}
+
 function applyEngineProfile() {
   // Clear branch-only values when returning to an older engine. This prevents
   // an option from being accidentally sent to a binary that did not advertise
@@ -181,21 +244,17 @@ function applyEngineProfile() {
   const profileValues = profile?.parameters || profile?.values || {}
   const recommended = { ...engineRecommendedParams.value, ...profileValues }
   form.profile_id = profileId.value
-  if (typeof recommended.ctx_size === 'number') form.ctx_size = recommended.ctx_size
-  if (typeof recommended.ngl === 'number') form.ngl = recommended.ngl
-  if (typeof recommended.device === 'string') form.device = recommended.device
-  if (recommended.fit === 'on' || recommended.fit === 'off') form.fit = recommended.fit
-  if (typeof recommended.kv_unified === 'boolean') form.kv_unified = recommended.kv_unified
-  if (typeof recommended.cache_reuse === 'number') form.cache_reuse = recommended.cache_reuse
-  if (typeof recommended.spec_draft_p_min === 'number') form.spec_draft_p_min = recommended.spec_draft_p_min
-  if (typeof recommended.batch === 'number') form.batch = recommended.batch
-  if (typeof recommended.ubatch === 'number') form.ubatch = recommended.ubatch
-  if (typeof recommended.concurrency === 'number') form.concurrency = recommended.concurrency
-  if (typeof recommended.spec_draft_n_max === 'number') form.spec_draft_n_max = recommended.spec_draft_n_max
-  if (typeof recommended.threads === 'number') form.threads = recommended.threads
-  if (typeof recommended.temp === 'number') form.temp = recommended.temp
-  if (typeof recommended.k_cache_type === 'string') form.k_cache_type = recommended.k_cache_type
-  if (typeof recommended.v_cache_type === 'string') form.v_cache_type = recommended.v_cache_type
+  const formRecord = form as unknown as Record<string, unknown>
+  for (const parameter of engineParameterSchema.value) {
+    if (parameter.supported === false || !parameter.managed) continue
+    const formKey = managedFormAliases[parameter.key]
+    if (!formKey) continue
+    const fallback = parameter.key === 'ctx_size' ? (props.model.ctx_default ?? parameter.default) : parameter.default
+    const value = recommended[parameter.key] ?? parameter.recommended ?? fallback
+    if (value !== undefined && value !== null && value !== '') {
+      formRecord[formKey] = normalizeFormDefault(parameter.key, value)
+    }
+  }
   for (const parameter of engineParameterSchema.value) {
     if (parameter.supported === false || parameter.managed) continue
     const profileValue = profileValues[parameter.key]
@@ -204,6 +263,86 @@ function applyEngineProfile() {
     const value = profileValue ?? currentValue ?? recommendedValue ?? parameter.default
     if (value !== undefined && value !== null) parameterValues[parameter.key] = value
     else delete parameterValues[parameter.key]
+  }
+}
+
+function rememberedConfigKey(engine = form.llama_version) {
+  if (!engine) return ''
+  return `model-manager:deploy-config:v2:${encodeURIComponent(props.model.id)}:${encodeURIComponent(engine)}`
+}
+
+function readRememberedConfig(engine = form.llama_version): RememberedDeployConfig | undefined {
+  const key = rememberedConfigKey(engine)
+  if (!key || typeof window === 'undefined') return undefined
+  try {
+    const raw = window.localStorage.getItem(key)
+    if (!raw) return undefined
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed as RememberedDeployConfig : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function restoreRememberedConfig(config?: RememberedDeployConfig) {
+  restoredRememberedConfig.value = Boolean(config)
+  if (!config) return
+  const formRecord = form as unknown as Record<string, unknown>
+  for (const key of rememberedFormKeys) {
+    if (config.form && Object.prototype.hasOwnProperty.call(config.form, key)) {
+      formRecord[key] = config.form[key]
+    }
+  }
+  if (config.form?.mmproj_file) {
+    const projector = projectorForValue(String(config.form.mmproj_file))
+    form.mmproj_file = projector?.id || ''
+  }
+  if (config.form?.draft_model_id) {
+    const draftId = String(config.form.draft_model_id)
+    form.draft_model_id = draftModels.value.some((item) => item.id === draftId) ? draftId : ''
+  }
+  mtpEnabled.value = Boolean(config.mtp_enabled) && mtpAvailable.value
+  ngramEnabled.value = Boolean(config.ngram_enabled) && selectedEngine.value?.supports_ngram !== false
+  if (config.parameters && typeof config.parameters === 'object') {
+    const allowed = new Set(engineParameterSchema.value.filter((item) => item.supported !== false && !item.managed).map((item) => item.key))
+    for (const [key, value] of Object.entries(config.parameters)) {
+      if (allowed.has(key)) parameterValues[key] = value
+    }
+  }
+  form.mmproj = Boolean(form.mmproj_file)
+  keepCacheSelection()
+}
+
+function selectEngineDefaults(engine: string) {
+  if (!engine || !engines.value.length) return
+  restoringConfig.value = true
+  const remembered = readRememberedConfig(engine)
+  const rememberedProfile = remembered?.profile_id
+  profileId.value = rememberedProfile && engineProfiles.value[rememberedProfile] ? rememberedProfile : 'default'
+  applyEngineProfile()
+  restoreRememberedConfig(remembered)
+  keepCacheSelection()
+  restoringConfig.value = false
+  persistenceReady.value = true
+}
+
+function persistRememberedConfig() {
+  if (!persistenceReady.value || restoringConfig.value || typeof window === 'undefined') return
+  const key = rememberedConfigKey()
+  if (!key) return
+  const formRecord = form as unknown as Record<string, unknown>
+  const rememberedForm = Object.fromEntries(rememberedFormKeys.map((name) => [name, formRecord[name]]))
+  try {
+    window.localStorage.setItem(key, JSON.stringify({
+      profile_id: profileId.value,
+      mtp_enabled: mtpEnabled.value,
+      ngram_enabled: ngramEnabled.value,
+      form: rememberedForm,
+      parameters: { ...parameterValues },
+    }))
+  } catch {
+    // Local storage is an enhancement; a quota/private-mode failure must not
+    // block deployment.
   }
 }
 
@@ -245,30 +384,35 @@ function keepCacheSelection() {
 
 watch(engineSupportsMtp, (available) => {
   if (!available) mtpEnabled.value = false
-})
+}, { flush: 'sync' })
 
 watch(() => selectedEngine.value?.supports_ngram, (available) => {
   if (available === false) ngramEnabled.value = false
-})
+}, { flush: 'sync' })
 
 watch(() => form.llama_version, (key) => {
   if (key) window.localStorage.setItem('model-manager:last-engine', key)
   if (key && engines.value.length) {
-    profileId.value = 'default'
-    applyEngineProfile()
+    selectEngineDefaults(key)
   }
   keepCacheSelection()
-})
+}, { flush: 'sync' })
 
-watch(profileId, () => applyEngineProfile())
+watch(profileId, () => {
+  if (!restoringConfig.value) applyEngineProfile()
+}, { flush: 'sync' })
 
 watch(mtpEnabled, (enabled) => {
   if (enabled) form.draft_model_id = ''
-})
+}, { flush: 'sync' })
 
 watch(() => form.draft_model_id, (value) => {
   if (value) mtpEnabled.value = false
-})
+}, { flush: 'sync' })
+
+watch(form, persistRememberedConfig, { deep: true })
+watch(parameterValues, persistRememberedConfig, { deep: true })
+watch([mtpEnabled, ngramEnabled, profileId], persistRememberedConfig, { flush: 'sync' })
 
 onMounted(async () => {
   try {
@@ -288,13 +432,7 @@ onMounted(async () => {
       engines.value[0]?.key,
     ].filter((key): key is string => Boolean(key))
     form.llama_version = engineCandidates.find((key) => engines.value.some((item) => item.key === key)) || ''
-    profileId.value = 'default'
-    applyEngineProfile()
     keepCacheSelection()
-    // The computed value is initially false while the engine list is loading,
-    // so explicitly clear a previously saved MTP selection once the actual
-    // selected engine is known.
-    if (!engineSupportsMtp.value) mtpEnabled.value = false
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : '部署预检失败'
   } finally {
@@ -350,26 +488,32 @@ async function submit() {
         </div>
 
         <section class="form-section">
-          <h3>1. 引擎选择</h3>
-          <label class="full-field"><span>llama.cpp 版本</span><select v-model="form.llama_version"><option v-for="engine in engines" :key="engine.key" :value="engine.key">{{ engine.name }} · {{ engine.version }}</option></select></label>
-          <label v-if="profileOptions.length" class="full-field"><span>部署 profile</span><select v-model="profileId"><option v-for="([key, profile]) in profileOptions" :key="key" :value="key">{{ profile.label || key }}</option></select><small>profile 只覆盖推荐值，仍可继续调整公共参数。</small></label>
-          <div v-if="selectedEngine" class="feature-row"><span v-for="feature in selectedEngine.features" :key="feature">{{ feature }}</span></div>
-          <div v-if="selectedEngine" class="engine-profile">
-            <div class="engine-profile-title">{{ selectedEngine.branch ? `分支：${selectedEngine.branch}` : '通用 llama.cpp 引擎' }}<span v-if="selectedEngine.gpu_targets?.length"> · {{ selectedEngine.gpu_targets.join(', ') }}</span></div>
-            <p v-if="selectedEngine.backend || selectedEngine.driver">后端：{{ selectedEngine.backend || 'llama' }}<span v-if="selectedEngine.driver"> · 驱动：{{ selectedEngine.driver }}</span></p>
-            <p v-if="selectedEngine.binary_path">二进制：<code>{{ selectedEngine.binary_path }}</code></p>
-            <p v-if="selectedEngine.parameter_file">参数来源：<code>{{ selectedEngine.parameter_file }}</code></p>
-            <p v-if="selectedEngine.load_strategy?.default">加载策略：{{ selectedEngine.load_strategy.default.load_mode || '默认' }}<span v-if="selectedEngine.load_strategy.default.fit"> · Fit {{ selectedEngine.load_strategy.default.fit }}</span><span v-if="selectedEngine.load_strategy.default.kv_cache"> · KV {{ selectedEngine.load_strategy.default.kv_cache }}</span></p>
-            <p v-for="note in selectedEngine.parameter_notes" :key="note">{{ note }}</p>
-            <p>统一参数 {{ supportedEngineParameterCount }} 项；独占参数 {{ selectedEngine.exclusive_parameters?.length || 0 }} 项。</p>
-            <p v-if="!engineDifferences.length && !selectedEngine.exclusive_parameters?.length">该引擎没有额外差异，使用统一部署参数。</p>
-            <div v-if="engineDifferences.length" class="engine-parameter-list">
-              <span v-for="([key, difference]) in engineDifferences" :key="key" :title="difference.reason">{{ key }}：{{ difference.recommended }}</span>
-            </div>
-            <div v-if="selectedEngine.exclusive_parameters?.length" class="engine-parameter-list">
-              <span v-for="key in selectedEngine.exclusive_parameters" :key="key">独占：{{ key }}</span>
-            </div>
+          <h3>1. 引擎选择 <span class="section-note">模型 → 引擎 → 调度</span></h3>
+          <div class="deploy-flow">
+            <div><small>模型</small><strong>{{ model.family || model.alias || model.name }}</strong><span>{{ model.format || 'GGUF' }} · {{ model.size_human }}</span></div>
+            <b>→</b>
+            <div><small>引擎</small><strong>{{ selectedEngine?.name || '选择引擎' }}</strong><span>{{ selectedEngine?.version || '加载中' }}<span v-if="selectedEngine?.backend"> · {{ selectedEngine.backend }}</span></span></div>
+            <b>→</b>
+            <div><small>调度</small><strong>{{ selectedProfileLabel }}</strong><span>{{ form.concurrency }} 并发 · {{ contextLabel }}</span></div>
           </div>
+          <label class="full-field"><span>引擎</span><select v-model="form.llama_version"><option v-for="engine in engines" :key="engine.key" :value="engine.key">{{ engine.name }} · {{ engine.version }}</option></select></label>
+          <label v-if="profileOptions.length" class="full-field"><span>调度方案</span><select v-model="profileId"><option v-for="([key, profile]) in profileOptions" :key="key" :value="key">{{ profile.label || key }}</option></select></label>
+          <p v-if="restoredRememberedConfig" class="config-memory">已恢复此模型 + 引擎的最近一次配置</p>
+          <details v-if="selectedEngine" class="inline-details">
+            <summary>更多引擎信息 <ChevronDown :size="15" /></summary>
+            <div class="feature-row"><span v-for="feature in selectedEngine.features" :key="feature">{{ feature }}</span></div>
+            <div class="engine-profile">
+              <div class="engine-profile-title">{{ selectedEngine.branch ? `分支：${selectedEngine.branch}` : '通用 llama.cpp 引擎' }}<span v-if="selectedEngine.gpu_targets?.length"> · {{ selectedEngine.gpu_targets.join(', ') }}</span></div>
+              <p v-if="selectedEngine.backend || selectedEngine.driver">后端：{{ selectedEngine.backend || 'llama' }}<span v-if="selectedEngine.driver"> · 驱动：{{ selectedEngine.driver }}</span></p>
+              <p v-if="selectedEngine.binary_path">二进制：<code>{{ selectedEngine.binary_path }}</code></p>
+              <p v-if="selectedEngine.parameter_file">参数文件：<code>{{ selectedEngine.parameter_file }}</code></p>
+              <p v-if="selectedEngine.load_strategy?.default">加载：{{ selectedEngine.load_strategy.default.load_mode || '默认' }}<span v-if="selectedEngine.load_strategy.default.fit"> · Fit {{ selectedEngine.load_strategy.default.fit }}</span><span v-if="selectedEngine.load_strategy.default.kv_cache"> · KV {{ selectedEngine.load_strategy.default.kv_cache }}</span></p>
+              <p>共性 {{ supportedEngineParameterCount - (selectedEngine.exclusive_parameters?.length || 0) }} 项 · 拓展 {{ selectedEngine.exclusive_parameters?.length || 0 }} 项</p>
+              <div v-if="engineDifferences.length" class="engine-parameter-list">
+                <span v-for="([key, difference]) in engineDifferences" :key="key" :title="difference.reason">{{ key }}：{{ difference.recommended }}</span>
+              </div>
+            </div>
+          </details>
         </section>
 
         <section class="form-section">
@@ -377,17 +521,23 @@ async function submit() {
           <div class="form-grid">
             <label><span>上下文大小</span><select v-model.number="form.ctx_size"><option v-for="size in contextOptions" :key="size" :value="size">{{ size >= 1048576 ? '1024K' : `${size / 1024}K` }}</option></select></label>
             <label><span>并发数</span><select v-model.number="form.concurrency"><option v-for="n in 4" :key="n" :value="n">{{ n }}</option></select></label>
-            <label><span>GPU 层数</span><input v-model.number="form.ngl" type="number" min="1" max="99" /></label>
-            <label><span>GPU</span><input v-model="form.gpu" /></label>
           </div>
-          <label class="full-field"><span>视觉模型</span><select v-model="form.mmproj_file"><option value="">不加载视觉模型</option><option v-for="projector in projectors" :key="projector.id" :value="projector.id">{{ projector.name }} · {{ Math.round(projector.size / 1024 / 1024) }}MB</option></select><small>{{ projectors.length ? '仅展示与当前主模型同目录匹配的视觉模型；默认使用该目录首个匹配项，也可明确选择不加载' : '当前模型目录没有可匹配的视觉模型，默认不加载' }}</small></label>
-          <div class="form-grid enhancement-params">
-            <label><span>投机解码方式</span><select v-model="speculationMode"><option v-for="option in speculationModeOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select><small>{{ supportsMtp ? '已识别 MTP 模型，默认优先 MTP' : '未识别 MTP，默认关闭；可按需选择 n-gram' }}</small></label>
-            <label v-if="mtpEnabled || form.draft_model_id"><span>预测 token 数</span><input v-model.number="form.spec_draft_n_max" type="number" min="1" max="32" /></label>
-            <label v-if="(mtpEnabled || form.draft_model_id) && supportsEngineParameter('spec_draft_p_min')"><span>接受阈值</span><input v-model.number="form.spec_draft_p_min" type="number" min="0" max="1" step="0.01" /><small>当前引擎推荐 {{ recommendedValue({ key: 'spec_draft_p_min' }) }}</small></label>
-            <label v-if="ngramEnabled"><span>n-gram 匹配长度</span><input v-model.number="form.ngram_mod_n_match" type="number" min="1" max="256" /></label>
-          </div>
-          <label v-if="draftModels.length || engineSupportsDraft" class="full-field draft-model-field"><span>草稿模型</span><select v-model="form.draft_model_id" :disabled="!draftAvailable || mtpEnabled"><option value="">不使用外置草稿模型</option><option v-for="draft in draftModels" :key="draft.id" :value="draft.id">{{ draft.name }} · {{ draft.size_human }}</option></select><small>{{ mtpEnabled ? '当前使用 MTP 内置草稿层；如需外置草稿模型，请将投机解码方式切换为 n-gram 或关闭' : draftAvailable ? '仅展示与当前主模型同目录或同族的草稿模型' : '当前模型包未发现可用草稿模型，或所选引擎不支持外置草稿模型' }}</small></label>
+          <p class="section-default">默认：按模型能力 × 引擎推荐 profile 生成；已保存的本模型配置优先恢复。</p>
+          <details class="inline-details">
+            <summary>更多基础配置 <ChevronDown :size="15" /></summary>
+            <div class="form-grid">
+              <label><span>GPU 层数</span><input v-model.number="form.ngl" type="number" min="1" max="99" /></label>
+              <label><span>GPU</span><input v-model="form.gpu" /></label>
+            </div>
+            <label class="full-field"><span>视觉模型</span><select v-model="form.mmproj_file"><option value="">不加载视觉模型</option><option v-for="projector in projectors" :key="projector.id" :value="projector.id">{{ projector.name }} · {{ Math.round(projector.size / 1024 / 1024) }}MB</option></select><small>{{ projectors.length ? '仅展示当前模型目录的匹配项，默认选择最佳匹配' : '当前模型目录没有可匹配的视觉模型' }}</small></label>
+            <div class="form-grid enhancement-params">
+              <label><span>投机解码</span><select v-model="speculationMode"><option v-for="option in speculationModeOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select><small>{{ supportsMtp ? '模型已识别 MTP，默认 MTP' : '模型未识别 MTP，默认关闭' }}</small></label>
+              <label v-if="mtpEnabled || form.draft_model_id"><span>预测 token 数</span><input v-model.number="form.spec_draft_n_max" type="number" min="1" max="32" /></label>
+              <label v-if="(mtpEnabled || form.draft_model_id) && supportsEngineParameter('spec_draft_p_min')"><span>接受阈值</span><input v-model.number="form.spec_draft_p_min" type="number" min="0" max="1" step="0.01" /><small>推荐 {{ recommendedValue({ key: 'spec_draft_p_min' }) }}</small></label>
+              <label v-if="ngramEnabled"><span>n-gram 匹配长度</span><input v-model.number="form.ngram_mod_n_match" type="number" min="1" max="256" /></label>
+            </div>
+            <label v-if="draftModels.length || engineSupportsDraft" class="full-field draft-model-field"><span>草稿模型</span><select v-model="form.draft_model_id" :disabled="!draftAvailable || mtpEnabled"><option value="">不使用外置草稿模型</option><option v-for="draft in draftModels" :key="draft.id" :value="draft.id">{{ draft.name }} · {{ draft.size_human }}</option></select><small>{{ mtpEnabled ? '当前使用 MTP；切换到 n-gram 或关闭后可选外置草稿模型' : draftAvailable ? '仅展示当前模型目录或模型族的草稿模型' : '未发现可用草稿模型' }}</small></label>
+          </details>
         </section>
 
         <details class="advanced-panel">
