@@ -48,6 +48,11 @@ type RememberedDeployConfig = {
   parameters?: Record<string, unknown>
 }
 
+function normalizeReasoning(value: unknown): DeployPayload['reasoning'] {
+  const normalized = String(value ?? '').toLowerCase()
+  return normalized === 'on' || normalized === 'auto' ? normalized : 'off'
+}
+
 const form = reactive<DeployPayload>({
   filename: props.model.id,
   ctx_size: props.model.ctx_default || 131072,
@@ -67,7 +72,7 @@ const form = reactive<DeployPayload>({
   temp: props.currentConfig.temp ?? 0.7,
   engine: 'llama',
   llama_version: '',
-  reasoning: 'off',
+  reasoning: normalizeReasoning(props.currentConfig.reasoning),
   ui: false,
   mmproj: props.currentConfig.mmproj || false,
   mmproj_file: props.currentConfig.mmproj_file || '',
@@ -277,6 +282,7 @@ const managedFormAliases: Record<string, string> = {
 }
 
 function normalizeFormDefault(key: string, value: unknown) {
+  if (key === 'reasoning') return normalizeReasoning(value)
   if (key === 'flash_attn' || key === 'chunked_batch') {
     return value === true || ['on', 'true', '1', 'yes'].includes(String(value).toLowerCase())
   }
@@ -360,7 +366,7 @@ function restoreRememberedConfig(config?: RememberedDeployConfig) {
   const formRecord = form as unknown as Record<string, unknown>
   for (const key of rememberedFormKeys) {
     if (config.form && Object.prototype.hasOwnProperty.call(config.form, key)) {
-      formRecord[key] = config.form[key]
+      formRecord[key] = key === 'reasoning' ? normalizeReasoning(config.form[key]) : config.form[key]
     }
   }
   if (config.form?.mmproj_file) {
@@ -672,6 +678,7 @@ async function submit() {
             <label data-field="ctx_size"><span>上下文大小</span><select v-model.number="form.ctx_size"><option v-for="size in visibleContextOptions" :key="size" :value="size">{{ size >= 1048576 ? '1024K' : `${size / 1024}K` }}</option></select><small>上限 {{ Math.round(contextLimit / 1024) }}K（模型窗口 × 并发数）</small></label>
             <label data-field="concurrency"><span>并发数</span><select v-model.number="form.concurrency"><option v-for="n in 4" :key="n" :value="n">{{ n }}</option></select></label>
           </div>
+          <label class="full-field reasoning-field" data-field="reasoning"><span>思考模式</span><select v-model="form.reasoning"><option value="off">关闭思考模式</option><option value="on">开启思考模式</option><option value="auto">自动</option></select><small>关闭后不输出思考过程；自动由模型或引擎决定</small></label>
           <p class="section-default">默认：按模型能力 × 引擎推荐 profile 生成；已保存的本模型配置优先恢复。</p>
           <details class="inline-details">
             <summary>更多基础配置 <ChevronDown :size="15" /></summary>

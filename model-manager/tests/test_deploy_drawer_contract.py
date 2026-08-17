@@ -29,6 +29,7 @@ class DeployDrawerContractTests(unittest.TestCase):
             "spec_draft_p_min",
             "ngram_mod_n_match",
             "fit",
+            "reasoning",
         ):
             pattern = rf'data-field="{key}"[\s\S]*?v-model(?:\.number)?="form\.{key}"'
             self.assertRegex(self.source, pattern, msg=f"字段 {key} 绑定错位")
@@ -41,8 +42,15 @@ class DeployDrawerContractTests(unittest.TestCase):
 
     def test_form_grid_controls_do_not_stretch_into_neighboring_rows(self):
         self.assertIn("align-content: start", self.styles)
+        self.assertIn("align-items: start", self.styles)
         self.assertIn("height: 38px", self.styles)
+        self.assertIn("width: 100%", self.styles)
         self.assertIn(".form-grid label > select", self.styles)
+
+    def test_reasoning_mode_is_visible_in_basic_configuration(self):
+        self.assertIn('data-field="reasoning"', self.source)
+        self.assertIn('v-model="form.reasoning"', self.source)
+        self.assertIn('<option value="off">关闭思考模式</option>', self.source)
 
     def test_advanced_sections_use_compact_titles(self):
         self.assertIn("<summary>高级参数 <ChevronDown", self.source)
