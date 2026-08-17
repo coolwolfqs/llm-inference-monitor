@@ -149,12 +149,20 @@ func (b *v2EventBroadcaster) subscribe(after uint64) (uint64, <-chan []byte, fun
 }
 
 func buildV2EventFrame(cfg *shared.Config, hc *shared.HTTPClient, id uint64) ([]byte, error) {
+	// The v2 event stream carries complete current-state section snapshots.
+	// Mirror the snapshot response (handleV2Snapshot) by including the
+	// freshness and quality maps at the envelope top level so realtime clients
+	// can keep their data-freshness / quality badges aligned with the live
+	// stream instead of freezing at the first snapshot value.
+	freshness := collectorFreshness()
 	envelope := map[string]interface{}{
 		"id":             id,
 		"type":           "metrics.fast",
 		"schema_version": "2.0",
 		"collected_at":   time.Now().Unix(),
 		"data":           map[string]interface{}{"sections": cachedV2Sections(cfg, hc)},
+		"freshness":      freshness,
+		"quality":        v2Quality(freshness),
 	}
 	payload, err := json.Marshal(envelope)
 	if err != nil {
