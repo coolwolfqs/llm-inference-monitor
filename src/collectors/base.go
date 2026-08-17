@@ -82,6 +82,11 @@ func (b *BaseCollector) Run(collectFn func(ctx context.Context) (interface{}, er
 				b.lastDuration = time.Since(started)
 				b.lastError = err.Error()
 				b.latestMu.Unlock()
+				// Keep the last successful sample for continuity, but make the
+				// failure observable in both freshness and time-series health.
+				// Returning no sample as collect_ok=1 was the source of false-green
+				// inference and LLM panels after an upstream partial failure.
+				b.store.Write(b.name+"_collect_ok", 0.0, nil, time.Now())
 				shared.Errorf("[%s] collect error: %v", b.name, err)
 				return
 			}

@@ -275,7 +275,7 @@ onUnmounted(() => clearTimeout(noticeTimer))
       </template>
     </main>
 
-    <DeployDrawer v-if="deployModel" :model="deployModel" :current-config="state?.current_config || {}" @close="deployModel = undefined" @deployed="watchDeployment" />
+    <DeployDrawer v-if="deployModel" :model="deployModel" :current-config="state?.current_config || {}" :is-current="deployModel.id === currentId" @close="deployModel = undefined" @deployed="watchDeployment" />
 
     <div v-if="detailModel" class="modal-backdrop" @click.self="detailModel = undefined"><section class="dialog"><header><div><span class="eyebrow">工件详情</span><h2>{{ detailModel.family || detailModel.alias }}</h2></div><button class="icon-button" @click="detailModel = undefined">×</button></header><dl><div><dt>文件名</dt><dd>{{ detailModel.name }}</dd></div><div><dt>相对路径</dt><dd>{{ detailModel.relative_path }}</dd></div><div><dt>类型 / 量化</dt><dd>{{ detailModel.format || '—' }} / {{ detailModel.quant_type || '—' }}</dd></div><div><dt>容量</dt><dd>{{ detailModel.size_human }}</dd></div><div><dt>架构</dt><dd>{{ detailModel.classification?.architecture || '—' }}</dd></div><div><dt>上下文</dt><dd>{{ detailModel.ctx_default ? `${detailModel.ctx_default / 1024}K` : '—' }}</dd></div></dl><footer><button class="button ghost" @click="detailModel = undefined">关闭</button><button v-if="detailModel.deployable" class="button primary" @click="deployModel = detailModel; detailModel = undefined">部署此模型</button></footer></section></div>
 

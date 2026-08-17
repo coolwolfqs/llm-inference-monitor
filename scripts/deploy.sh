@@ -1,36 +1,39 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-echo "=== InferenceHub v3 Deploy Script ==="
+# Release through the supervised units. This script deliberately does not
+# start a second nohup process or touch VictoriaMetrics lifecycle.
+project=/data/inference-hub-v3
+dashboard=/data/dashboard
+release_dir=/data/rollback/inference-release-$(date +%Y%m%d-%H%M%S)
+mkdir -p "$release_dir"
 
-# Check if VictoriaMetrics is running
-if ! curl -s http://127.0.0.1:8428/-/healthy > /dev/null 2>&1; then
-    echo "[WARN] VictoriaMetrics not running on 8428, starting..."
-    docker run -d --name inference-hub-vm \
-        -p 8428:8428 \
-        -v vm-data:/victoria-metrics-data \
-        victoriametrics/victoria-metrics:latest \
-        --storageDataPath=/victoria-metrics-data \
-        --retentionPeriod=30d
-fi
+echo "[1/5] Backing up the running artifacts..."
+cp -a "$project/inference-hub-v3" "$release_dir/inference-hub-v3.before"
+cp -a /data/dashboard/index.html "$release_dir/dashboard-index.before"
 
-# Build
-echo "[1/3] Building Go binary..."
-cd /data/inference-hub-v3
-make build
+echo "[2/5] Building the Go binary with embedded provenance..."
+docker run --rm --network host \
+  -v "$project:/src" -w /src golang:1.24-bookworm \
+  bash -lc 'make build && test -x inference-hub-v3'
 
-# Build frontend
-echo "[2/3] Building frontend..."
-cd frontend
-npm install --silent
-npm run build
-cp -r dist/* ../static/ 2>/dev/null || mkdir -p ../static && cp -r dist/* ../static/
+echo "[3/5] Building the active dashboard source..."
+docker run --rm --network host \
+  -v "$dashboard:/app" -w /app/frontend node:20-bookworm \
+  bash -lc '/app/frontend/node_modules/.bin/vite --version >/dev/null && /app/frontend/node_modules/.bin/vue-tsc --noEmit && /app/frontend/node_modules/.bin/vitest run && node scripts/generate-layout.mjs && /app/frontend/node_modules/.bin/vite build && node scripts/promote.mjs'
 
-# Start
-echo "[3/3] Starting InferenceHub v3 on port 9092..."
-cd /data/inference-hub-v3
-nohup ./inference-hub-v3 > /var/log/inference-hub-v3.log 2>&1 &
+echo "[4/5] Restarting the supervised gateway..."
+sudo -n systemctl restart inference-hub-v3.service
+for attempt in $(seq 1 30); do
+  if curl -fsS --max-time 2 http://127.0.0.1:8081/api/health >/tmp/inference-hub-health.json; then
+    break
+  fi
+  sleep 1
+done
+test -s /tmp/inference-hub-health.json
+systemctl is-active --quiet inference-hub-v3.service
 
-echo "=== Deploy complete ==="
-echo "Dashboard: http://10.1.1.4:9092"
-echo "VictoriaMetrics: http://10.1.1.4:8428"
+echo "[5/5] Verifying the release artifact..."
+curl -fsS --max-time 5 http://127.0.0.1:8081/api/health
+echo
+echo "Release complete; rollback snapshot: $release_dir"

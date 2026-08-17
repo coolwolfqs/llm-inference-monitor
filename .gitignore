@@ -24,3 +24,9 @@ vendor/
 *.swp
 *.swo
 coverage/
+
+# Host-local runtime and release-build artifacts
+.gocache/
+certs/
+kv_baseline.json
+*.new

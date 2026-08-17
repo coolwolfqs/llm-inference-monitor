@@ -2,7 +2,7 @@
 collectors:
   gpu:
     enabled: true
-    interval_sec: 5
+    interval_sec: 10
     vendor: "auto"  # auto | nvidia | amd
   system:
     enabled: true
@@ -16,10 +16,10 @@ collectors:
     enabled: true
     # Metrics scraping can be slower while multiple inference slots are busy.
     # Keep it independent from the dashboard SSE cadence.
-    interval_sec: 5
+    interval_sec: 10
     history_size: 300
   kv_engine:
     enabled: true
-    interval_sec: 5
+    interval_sec: 10
     baseline_auto_capture: true
     baseline_capture_interval_min: 30

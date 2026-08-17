@@ -10,6 +10,7 @@ import shlex
 import asyncio
 import json
 import socket
+import threading
 import uuid
 import urllib.error
 import urllib.parse
@@ -25,6 +26,8 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Request
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+
+RELEASE_VERSION = "v0.5"
 
 from mm_core import CatalogService, settings
 from mm_core.operations import OperationStore
@@ -64,6 +67,18 @@ background_executor = ThreadPoolExecutor(
 HF_API = "https://huggingface.co/api"
 HF_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 MAX_UPLOAD_BYTES = 512 * 1024**3
+DOWNLOAD_RESERVE_BYTES = 2 * 1024**3
+try:
+    MAX_DOWNLOAD_BYTES = max(1, int(os.getenv("MODEL_MANAGER_MAX_DOWNLOAD_BYTES", str(512 * 1024**3))))
+except ValueError:
+    MAX_DOWNLOAD_BYTES = 512 * 1024**3
+
+_download_cancel_events: dict[str, threading.Event] = {}
+_download_cancel_lock = threading.RLock()
+
+
+class _DownloadCancelled(Exception):
+    pass
 
 
 def _write_upload_chunk(fd: int, chunk: bytes) -> None:
@@ -106,7 +121,15 @@ def _validate_hf_file(repo_id: str, filename: str) -> tuple[str, str]:
 def _run_hf_download(task_id: str, repo_id: str, filename: str, destination: Path) -> None:
     temporary = destination.with_name(f".{destination.name}.{task_id}.downloading")
     downloaded = total = 0
+    with _download_cancel_lock:
+        cancel_event = _download_cancel_events.get(task_id)
+
+    def check_cancelled() -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise _DownloadCancelled("下载已取消")
+
     try:
+        destination.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
         download_tasks.update(task_id, state="running", phase="connecting", progress=1)
         url = f"https://huggingface.co/{repo_id}/resolve/main/{urllib.parse.quote(filename, safe='/')}?download=true"
         headers = {"User-Agent": "model-manager/1.0"}
@@ -115,15 +138,22 @@ def _run_hf_download(task_id: str, repo_id: str, filename: str, destination: Pat
             headers["Authorization"] = f"Bearer {token}"
         with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=60) as response:
             total = int(response.headers.get("Content-Length") or 0)
-            if total and shutil.disk_usage(destination.parent).free < total + 2 * 1024**3:
+            if total > MAX_DOWNLOAD_BYTES:
+                raise RuntimeError(f"远端文件超过下载上限 ({MAX_DOWNLOAD_BYTES} bytes)")
+            if total and shutil.disk_usage(destination.parent).free < total + DOWNLOAD_RESERVE_BYTES:
                 raise RuntimeError("磁盘空间不足，需额外保留 2 GB 安全空间")
             with open(temporary, "xb") as output:
                 while True:
+                    check_cancelled()
                     chunk = response.read(8 * 1024 * 1024)
                     if not chunk:
                         break
                     output.write(chunk)
                     downloaded += len(chunk)
+                    if downloaded > MAX_DOWNLOAD_BYTES:
+                        raise RuntimeError(f"下载超过上限 ({MAX_DOWNLOAD_BYTES} bytes)")
+                    if shutil.disk_usage(destination.parent).free < DOWNLOAD_RESERVE_BYTES:
+                        raise RuntimeError("下载过程中可用磁盘空间低于 2 GB 安全下限")
                     progress = min(99, int(downloaded * 100 / total)) if total else 1
                     download_tasks.update(task_id, state="running", phase="downloading", progress=progress,
                                           downloaded_bytes=downloaded, total_bytes=total)
@@ -132,10 +162,17 @@ def _run_hf_download(task_id: str, repo_id: str, filename: str, destination: Pat
         catalog_service.list_models(force=True)
         download_tasks.update(task_id, state="succeeded", phase="completed", progress=100,
                               downloaded_bytes=downloaded, total_bytes=total or downloaded)
+    except _DownloadCancelled as exc:
+        temporary.unlink(missing_ok=True)
+        download_tasks.update(task_id, state="cancelled", phase="cancelled", progress=100,
+                              downloaded_bytes=downloaded, total_bytes=total, error=str(exc))
     except Exception as exc:
         temporary.unlink(missing_ok=True)
         download_tasks.update(task_id, state="failed", phase="failed", progress=100,
                               downloaded_bytes=downloaded, total_bytes=total, error=str(exc))
+    finally:
+        with _download_cancel_lock:
+            _download_cancel_events.pop(task_id, None)
 
 
 def _safe_model_path(name, must_exist=False):
@@ -183,6 +220,34 @@ def _bounded_float(value, name, minimum, maximum):
     if not minimum <= parsed <= maximum:
         raise HTTPException(400, f"{name} 必须在 {minimum}-{maximum} 之间")
     return parsed
+
+
+def _normalize_flash_attn(value):
+    """Normalize UI booleans and API strings to llama.cpp's enum values."""
+    if value is True or str(value).strip().lower() in {"1", "true", "yes", "on"}:
+        return "on"
+    if value is False or str(value).strip().lower() in {"0", "false", "no", "off"}:
+        return "off"
+    normalized = str(value or "auto").strip().lower()
+    if normalized not in {"on", "off", "auto"}:
+        raise HTTPException(400, "flash_attn 必须是 on、off 或 auto")
+    return normalized
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    """Normalize JSON/form booleans without treating ``"false"`` as true."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on", "y"}:
+        return True
+    if normalized in {"0", "false", "no", "off", "n", ""}:
+        return False
+    return default
 
 # === Engine Registry (动态读取 /data/engines/*/VERSION.json) ===
 _ENGINES_CACHE = {"engines": [], "ts": 0}
@@ -281,7 +346,7 @@ _COMMON_ENGINE_PARAMETER_DEFINITIONS += (
     {"key": "ngram_map_k4v_min_hits", "label": "map-k4v 最小命中", "type": "integer", "flag": "--spec-ngram-map-k4v-min-hits", "min": 1, "max": 256, "default": 1, "group": "n-gram"},
     {"key": "mmproj", "label": "视觉投影组件", "type": "artifact", "flag": "--mmproj", "default": False, "group": "多模态", "managed": True},
     {"key": "mmproj_offload", "label": "视觉组件 GPU offload", "type": "boolean", "flag": "--mmproj-offload", "false_flag": "--no-mmproj-offload", "default": True, "group": "多模态"},
-    {"key": "reasoning", "label": "Reasoning", "type": "select", "flag": "--reasoning", "values": ["on", "off", "auto"], "default": "auto", "group": "生成", "managed": True},
+    {"key": "reasoning", "label": "Reasoning", "type": "select", "flag": "--reasoning", "values": ["on", "off", "auto"], "default": "off", "group": "生成", "managed": True},
     {"key": "reasoning_format", "label": "Reasoning 格式", "type": "select", "flag": "--reasoning-format", "values": ["auto", "none", "deepseek", "deepseek-legacy"], "default": "auto", "group": "生成"},
     {"key": "reasoning_budget", "label": "Reasoning 预算", "type": "integer", "flag": "--reasoning-budget", "min": -1, "max": 1048576, "default": -1, "group": "生成"},
     {"key": "reasoning_preserve", "label": "保留 Reasoning 轨迹", "type": "boolean", "flag": "--reasoning-preserve", "false_flag": "--no-reasoning-preserve", "default": False, "group": "生成"},
@@ -621,6 +686,99 @@ def _engine_parameter_map(engine: dict[str, Any] | None) -> dict[str, dict[str, 
         for item in (engine.get("deployment_parameters") or engine.get("parameter_schema") or [])
         if isinstance(item, dict) and str(item.get("key") or "").strip()
     }
+
+
+def _coerce_runtime_parameter(item: dict[str, Any], value: str) -> Any:
+    """Convert an observed argv/env value using the registry type."""
+    value_type = str(item.get("type") or "string").strip().lower()
+    if value_type == "boolean":
+        return value.strip().lower() in {"1", "true", "on", "yes", "y"}
+    if value_type == "integer":
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return value
+    if value_type == "number":
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return value
+    return value
+
+
+def _scan_declared_runtime_parameters(
+    cmdline: list[str],
+    env_map: dict[str, str] | None,
+    engine: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Read registry-declared values from the *actual* process boundary.
+
+    The flat fields in ``_get_running_cmdline_config_scan`` are intentionally
+    kept for backward compatibility.  This companion map covers new registry
+    fields without another hard-coded parser change, while never exposing
+    secret environment variables.
+    """
+    parameter_map = _engine_parameter_map(engine)
+    if not parameter_map:
+        return {}, {}
+    env_map = env_map or {}
+    observed: dict[str, Any] = {}
+    sources: dict[str, str] = {}
+    declared_flags: set[str] = set()
+    flag_map: dict[str, tuple[str, ...]] = {}
+    false_flags: dict[str, str] = {}
+
+    for key, item in parameter_map.items():
+        if item.get("supported") is False:
+            continue
+        aliases = list(_COMMON_ENGINE_PARAMETER_ALIASES.get(key, ()))
+        declared = str(item.get("flag") or "").strip()
+        if declared:
+            aliases.append(declared)
+        aliases = tuple(dict.fromkeys(flag for flag in aliases if flag))
+        flag_map[key] = aliases
+        declared_flags.update(aliases)
+        false_flag = str(item.get("false_flag") or "").strip()
+        if false_flag:
+            false_flags[key] = false_flag
+            declared_flags.add(false_flag)
+
+    def argv_value(flags: tuple[str, ...]) -> tuple[bool, str | None]:
+        for index, token in enumerate(cmdline):
+            if token not in flags:
+                continue
+            if index + 1 < len(cmdline) and cmdline[index + 1] not in declared_flags:
+                return True, cmdline[index + 1]
+            return True, None
+        return False, None
+
+    for key, item in parameter_map.items():
+        if item.get("supported") is False:
+            continue
+        env_name = str(item.get("env") or "").strip()
+        if item.get("secret") or re.search(r"(?:KEY|TOKEN|PASSWORD|SECRET|CREDENTIAL)", env_name, re.IGNORECASE):
+            continue
+        value: Any = None
+        source = ""
+        present, raw = argv_value(flag_map[key])
+        if str(item.get("type") or "string").strip().lower() == "boolean":
+            false_flag = false_flags.get(key)
+            if false_flag and false_flag in cmdline:
+                value = False
+                source = "argv"
+            elif present:
+                value = True if raw is None else _coerce_runtime_parameter(item, raw)
+                source = "argv"
+        elif present and raw is not None:
+            value = _coerce_runtime_parameter(item, raw)
+            source = "argv"
+        if not source and env_name and env_name in env_map:
+            value = _coerce_runtime_parameter(item, env_map[env_name])
+            source = "env"
+        if source:
+            observed[key] = value
+            sources[key] = source
+    return observed, sources
 
 
 def _parameter_is_managed(item: dict[str, Any]) -> bool:
@@ -1611,6 +1769,7 @@ def _get_running_cmdline_config_scan():
             config["host"] = _arg("--host") or "0.0.0.0"
             config["port"] = int(_arg("--port") or 8080)
             gpu_env = ""
+            env_map: dict[str, str] = {}
             try:
                 process_env = open(f"/proc/{entry}/environ", "rb").read().split(b"\0")
                 env_map = {
@@ -1650,6 +1809,20 @@ def _get_running_cmdline_config_scan():
             bin_path = cmdline[0] if cmdline else ""
             config["binary_path"] = bin_path
             config["llama_version"] = _engine_key_from_binary(bin_path) or _get_active_engine() or "unknown"
+            engine_record = _get_engine_by_key(config["llama_version"])
+            observed_parameters, parameter_sources = _scan_declared_runtime_parameters(
+                cmdline, env_map, engine_record,
+            )
+            config["observed_parameters"] = observed_parameters
+            config["parameter_sources"] = parameter_sources
+            # ``parameters`` was historically the persisted recipe field.  A
+            # live process is different: expose the observed registry values
+            # here as well so old clients can see them, while list_models also
+            # keeps the explicit observed_parameters field for new clients.
+            config["parameters"] = observed_parameters
+            for key in ("no_mmap", "use_mlock", "numa", "poll_batch", "metrics"):
+                if key in observed_parameters:
+                    config[key] = observed_parameters[key]
             return config
     except Exception:
         pass
@@ -1989,6 +2162,11 @@ async def _runtime_event_watcher():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
+    await asyncio.gather(
+        asyncio.to_thread(operation_store.prune, 1000, 30 * 86400),
+        asyncio.to_thread(deployment_tasks.prune, 500, 30 * 86400),
+        asyncio.to_thread(download_tasks.prune, 500, 30 * 86400),
+    )
     await asyncio.to_thread(catalog_service.list_models)
     await _refresh_runtime_event(force=True)
     watcher = asyncio.create_task(_runtime_event_watcher(), name="runtime-observer")
@@ -2083,7 +2261,7 @@ allowed_origins = [
     item.strip()
     for item in os.getenv(
         "MODEL_MANAGER_ALLOWED_ORIGINS",
-        "http://10.1.1.4:8081,http://10.1.1.4:8093",
+        "",
     ).split(",")
     if item.strip()
 ]
@@ -2575,6 +2753,12 @@ async def recommend_model(filename: str = "", cache_type: str = "turbo3", v_cach
 
 @app.get("/api/models")
 async def list_models(force: bool = False):
+    if force:
+        # A forced recursive catalog scan is a control-plane operation. Keep
+        # the public read path cheap and make callers use the already protected
+        # POST /api/catalog/rescan endpoint instead of turning a query string
+        # into an unauthenticated disk-scan trigger.
+        raise HTTPException(403, "强制扫描请使用管理员接口 /api/catalog/rescan")
     models = await asyncio.to_thread(scan_models, force)
     total_size = sum(m["size"] for m in models)
     st = await asyncio.to_thread(os.statvfs, DATA_DIR)
@@ -2583,6 +2767,10 @@ async def list_models(force: bool = False):
 
     _, observed_config = _runtime_cache.peek()
     content = await asyncio.to_thread(read_start_script)
+    # `current_config` is the observed process state while the server is
+    # running.  Persisted profile/parameter data describes the next desired
+    # deployment and must not be mixed into the live snapshot: doing so makes
+    # the model-manager card look like a hybrid of argv and an old profile.
     current_config = observed_config or (parse_script_config(content) if content else {})
     persisted_config: dict[str, Any] = {}
     try:
@@ -2593,10 +2781,14 @@ async def list_models(force: bool = False):
                 persisted_config = raw_persisted
     except (OSError, json.JSONDecodeError):
         persisted_config = {}
-    if persisted_config:
+    desired_config = persisted_config
+    if persisted_config and not observed_config:
         current_config = dict(current_config)
         current_config.setdefault("profile_id", persisted_config.get("profile_id", "default"))
         current_config.setdefault("parameters", persisted_config.get("parameters", {}))
+    observed_parameters = current_config.get("observed_parameters")
+    if not isinstance(observed_parameters, dict):
+        observed_parameters = {}
     running = observed_config is not None
     current_model_id = ""
     model_path = current_config.get("model_path", "")
@@ -2640,7 +2832,10 @@ async def list_models(force: bool = False):
             "k_cache_type": current_config.get("k_cache_type", "q8_0"),
             "v_cache_type": current_config.get("v_cache_type", "q8_0"),
             "llama_version": current_config.get("llama_version") or _get_active_engine() or "unknown",
-            "profile_id": current_config.get("profile_id", persisted_config.get("profile_id", "default")),
+            # A running process has no authoritative profile id: a profile is
+            # a deployment recipe, while argv is the effective runtime.  The
+            # recipe remains available under `desired_config` below.
+            "profile_id": current_config.get("profile_id") if observed_config else current_config.get("profile_id", "default"),
             "draft_k_cache_type": current_config.get("draft_k_cache_type") if _supports_mtp(current_config.get("llama_version") or _get_active_engine() or "unknown") else None,
             "draft_v_cache_type": current_config.get("draft_v_cache_type") if _supports_mtp(current_config.get("llama_version") or _get_active_engine() or "unknown") else None,
             "batch": current_config.get("batch", 1024),
@@ -2670,8 +2865,16 @@ async def list_models(force: bool = False):
             "kv_unified": current_config.get("kv_unified", False),
             "cache_reuse": current_config.get("cache_reuse"),
             "spec_draft_p_min": current_config.get("spec_draft_p_min"),
-            "parameters": current_config.get("parameters") or persisted_config.get("parameters", {}),
+            "no_mmap": current_config.get("no_mmap", observed_parameters.get("no_mmap")),
+            "use_mlock": current_config.get("use_mlock", observed_parameters.get("use_mlock")),
+            "numa": current_config.get("numa", observed_parameters.get("numa")),
+            "poll_batch": current_config.get("poll_batch", observed_parameters.get("poll_batch")),
+            "metrics": current_config.get("metrics", observed_parameters.get("metrics")),
+            "parameters": current_config.get("parameters") or {},
+            "observed_parameters": observed_parameters,
+            "parameter_sources": current_config.get("parameter_sources") or {},
         },
+        "desired_config": desired_config,
         "mmproj_enabled": current_config.get("mmproj", False),
         "mmproj_file": current_config.get("mmproj_file"),
         "mmproj_files": mmproj_files,
@@ -2690,12 +2893,17 @@ async def health():
     return {
         "status": "ok",
         "version": app.version,
+        "release_version": RELEASE_VERSION,
         "catalog": await asyncio.to_thread(catalog_service.metadata),
         "inference": {
             "running": runtime is not None,
             "pid": runtime.get("pid") if runtime else None,
             "source": _runtime_scan_source,
             "cache": _runtime_cache.metadata(),
+        },
+        "limits": {
+            "max_download_bytes": MAX_DOWNLOAD_BYTES,
+            "download_reserve_bytes": DOWNLOAD_RESERVE_BYTES,
         },
     }
 
@@ -2755,6 +2963,92 @@ async def operation_history(limit: int = 50):
     return {"operations": operations, "latest_sequence": operations[0]["sequence"] if operations else 0}
 
 
+def _deployment_runtime_matches(runtime: dict[str, Any] | None, payload: dict[str, Any]) -> bool:
+    """Confirm the process reached the requested model/engine and explicit values."""
+    if not runtime or not runtime.get("pid") or not runtime.get("model_path"):
+        return False
+    model = catalog_service.find(str(payload.get("filename") or ""))
+    if not model:
+        return False
+    try:
+        expected_path = _safe_model_path(model.get("relative_path", model["id"]), True)
+        if Path(runtime["model_path"]).resolve() != Path(expected_path).resolve():
+            return False
+    except (OSError, ValueError, KeyError):
+        return False
+    expected_engine = str(payload.get("llama_version") or "").strip()
+    if expected_engine and str(runtime.get("llama_version") or "").strip() not in {expected_engine, "unknown"}:
+        return False
+
+    expected = dict(payload)
+    canonical = expected.get("parameters")
+    if isinstance(canonical, dict):
+        for key, value in canonical.items():
+            expected.setdefault(str(key), value)
+    boolean_keys = {"chunked_batch", "ui", "metrics", "no_mmap", "use_mlock", "kv_unified"}
+    numeric_keys = {
+        "ctx_size", "ngl", "concurrency", "batch", "ubatch", "threads", "threads_http",
+        "temp", "spec_draft_n_max", "ngram_mod_n_min", "ngram_mod_n_max", "ngram_mod_n_match",
+        "cache_ram", "sleep_idle_seconds", "n_cpu_moe",
+    }
+    for key in boolean_keys | numeric_keys | {
+        "k_cache_type", "v_cache_type", "draft_k_cache_type", "draft_v_cache_type",
+        "spec_type", "reasoning", "device", "fit", "tensor_split", "numa", "flash_attn",
+    }:
+        if key not in payload and not (isinstance(canonical, dict) and key in canonical):
+            continue
+        wanted = expected.get(key)
+        actual = runtime.get(key)
+        if wanted in (None, ""):
+            continue
+        if key in boolean_keys:
+            if _as_bool(wanted) != _as_bool(actual):
+                return False
+        elif key in numeric_keys:
+            try:
+                if float(wanted) != float(actual):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        elif key == "flash_attn":
+            if _normalize_flash_attn(wanted) != ("on" if _as_bool(actual) else "off"):
+                return False
+        elif str(wanted).strip() != str(actual or "").strip():
+            return False
+    return True
+
+
+def _reconcile_deployment_task(task_id: str, payload: dict[str, Any], timeout: int = 150) -> None:
+    """Reconcile a loopback timeout against the real inference process.
+
+    The deployment route may have completed its atomic switch while the
+    background HTTP client timed out reading the response.  Do not report a
+    false failure until the runtime boundary has been checked.
+    """
+    deployment_tasks.update(
+        task_id, state="running", phase="reconciling", progress=90,
+        error="部署响应超时，正在核对实际运行参数",
+    )
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            runtime = _get_running_cmdline_config(force=True)
+            if _deployment_runtime_matches(runtime, payload):
+                deployment_tasks.update(
+                    task_id, state="succeeded", phase="ready", progress=100,
+                    status_code=200,
+                    result={"reconciled": True, "pid": runtime.get("pid")},
+                )
+                return
+        except Exception:
+            pass
+        time.sleep(3)
+    deployment_tasks.update(
+        task_id, state="failed", phase="reconcile_failed", progress=100,
+        status_code=504, error="部署响应超时，且实际运行参数未达到目标",
+    )
+
+
 def _run_deployment_task(task_id: str, payload: dict):
     """Call the checked synchronous deployment route through loopback.
 
@@ -2773,7 +3067,7 @@ def _run_deployment_task(task_id: str, payload: dict):
         headers={"Content-Type": "application/json", "X-Admin-Key": ADMIN_API_KEY},
     )
     try:
-        with urllib.request.urlopen(request, timeout=360) as response:
+        with urllib.request.urlopen(request, timeout=480) as response:
             result = json.loads(response.read().decode("utf-8"))
             deployment_tasks.update(
                 task_id, state="succeeded", phase="ready", progress=100,
@@ -2789,6 +3083,17 @@ def _run_deployment_task(task_id: str, payload: dict):
             task_id, state="failed", phase="rolled_back", progress=100,
             status_code=exc.code, error=str(detail),
         )
+    except (TimeoutError, socket.timeout) as exc:
+        _reconcile_deployment_task(task_id, payload)
+    except urllib.error.URLError as exc:
+        reason = str(getattr(exc, "reason", exc)).lower()
+        if "timed out" in reason or "timeout" in reason:
+            _reconcile_deployment_task(task_id, payload)
+        else:
+            deployment_tasks.update(
+                task_id, state="failed", phase="failed", progress=100,
+                status_code=502, error=f"{type(exc).__name__}: {exc}",
+            )
     except Exception as exc:
         deployment_tasks.update(
             task_id, state="failed", phase="failed", progress=100,
@@ -2920,6 +3225,7 @@ async def deploy_model(request: Request):
     temp = data.get("temp", 0.7)
     reasoning = data.get("reasoning", "off")
     ui = data.get("ui", False)
+    metrics = data.get("metrics", True)
     kv_offload = data.get("kv_offload", "off")
     n_cpu_moe = data.get("n_cpu_moe", 0)
     gpu = data.get("gpu", "all")
@@ -2995,6 +3301,12 @@ async def deploy_model(request: Request):
             flash_attn = pre_recommended["flash_attn"]
         if "temp" not in data:
             temp = pre_recommended.get("temp", temp)
+        if "reasoning" not in data:
+            reasoning = pre_recommended.get("reasoning", reasoning)
+        if "ui" not in data:
+            ui = pre_recommended.get("ui", ui)
+        if "metrics" not in data:
+            metrics = pre_recommended.get("metrics", metrics)
         if "k_cache_type" not in data:
             k_cache_type = pre_recommended.get("k_cache_type", k_cache_type)
         if "v_cache_type" not in data:
@@ -3024,12 +3336,12 @@ async def deploy_model(request: Request):
     cache_ram = _bounded_int(cache_ram, "cache_ram", 0, 1048576)
     sleep_idle_seconds = _bounded_int(sleep_idle_seconds, "sleep_idle_seconds", 0, 86400)
     temp = _bounded_float(temp, "temp", 0, 5)
-    if isinstance(flash_attn, bool):
-        flash_attn = "on" if flash_attn else "off"
-    else:
-        flash_attn = str(flash_attn or "auto").strip().lower()
-    if flash_attn not in {"on", "off", "auto"}:
-        raise HTTPException(400, "flash_attn 必须是 on、off 或 auto")
+    flash_attn = _normalize_flash_attn(flash_attn)
+    chunked_batch = _as_bool(chunked_batch, True)
+    ui = _as_bool(ui, False)
+    metrics = _as_bool(metrics, True)
+    no_mmap = _as_bool(no_mmap, False)
+    use_mlock = _as_bool(use_mlock, False)
     if fit not in ("", "on", "off"):
         raise HTTPException(400, "fit 必须是 on 或 off")
     cache_reuse = None
@@ -3131,10 +3443,16 @@ async def deploy_model(request: Request):
             mmproj_file = str(data.get("mmproj_file", "") or "").strip()
             k_cache_type = data.get("k_cache_type", k_cache_type)
             v_cache_type = data.get("v_cache_type", v_cache_type)
-            flash_attn = data.get("flash_attn", flash_attn)
+            flash_attn = _normalize_flash_attn(data.get("flash_attn", flash_attn))
             batch = data.get("batch", batch)
             ubatch = data.get("ubatch", ubatch)
+            chunked_batch = data.get("chunked_batch", chunked_batch)
             threads = data.get("threads", threads)
+            threads_http = data.get("threads_http", threads_http)
+            temp = data.get("temp", temp)
+            reasoning = data.get("reasoning", reasoning)
+            ui = data.get("ui", ui)
+            metrics = data.get("metrics", metrics)
             spec_draft_n_max = data.get("spec_draft_n_max", spec_draft_n_max)
             spec_type = data.get("spec_type", spec_type)
             ngram_mod_n_min = data.get("ngram_mod_n_min", ngram_mod_n_min)
@@ -3145,6 +3463,8 @@ async def deploy_model(request: Request):
             draft_model_ref = str(data.get("draft_model_id") or data.get("draft_model") or "").strip()
             cache_ram = data.get("cache_ram", cache_ram)
             sleep_idle_seconds = data.get("sleep_idle_seconds", sleep_idle_seconds)
+            n_cpu_moe = data.get("n_cpu_moe", n_cpu_moe)
+            tensor_split = data.get("tensor_split", tensor_split)
             no_mmap = data.get("no_mmap", no_mmap)
             use_mlock = data.get("use_mlock", use_mlock)
             numa = data.get("numa", numa)
@@ -3155,6 +3475,11 @@ async def deploy_model(request: Request):
             kv_unified = kv_unified_raw is True or str(kv_unified_raw).lower() in {"1", "true", "on", "yes"}
             cache_reuse_raw = data.get("cache_reuse", cache_reuse_raw)
             spec_draft_p_min_raw = data.get("spec_draft_p_min", spec_draft_p_min_raw)
+        chunked_batch = _as_bool(chunked_batch, True)
+        ui = _as_bool(ui, False)
+        metrics = _as_bool(metrics, True)
+        no_mmap = _as_bool(no_mmap, False)
+        use_mlock = _as_bool(use_mlock, False)
         _validate_canonical_parameters(engine_record or {}, canonical_parameters)
         # The normalized deployment schema is the allow-list for optional
         # engine flags. Common flags are available to all compatible binaries;
@@ -3453,7 +3778,8 @@ async def deploy_model(request: Request):
         f"  --flash-attn {flash_attn_str} -b {batch} -ub {ubatch}{cb_str} -np {concurrency} -t {threads} \\",
         "  --ui \\" if ui else None,
         f"  --threads-http {threads_http} --temp {temp} --reasoning {reasoning} \\",
-        f"  --log-file /tmp/llama-server.log --log-verbosity 3 --log-colors off --metrics"
+        f"  --log-file /tmp/llama-server.log --log-verbosity 3 --log-colors off"
+        + (" --metrics" if metrics else "")
         + (f" --mmproj {shlex.quote(mmproj_path)}" if mmproj_path else "")
         + spec_params + extra_params + generic_params,
     ]
@@ -3529,6 +3855,7 @@ async def deploy_model(request: Request):
         "temp": temp,
         "reasoning": reasoning,
         "ui": ui,
+        "metrics": metrics,
         "llama_version": llama_version,
         "spec_type": spec_type,
         "spec_draft_n_max": spec_draft_n_max,
@@ -3690,10 +4017,13 @@ async def hugging_face_files(repo_id: str):
 async def create_hugging_face_download(request: Request):
     data = await request.json()
     repo_id, filename = _validate_hf_file(str(data.get("repo_id") or ""), str(data.get("filename") or ""))
-    destination = _safe_model_path(Path(filename).name)
+    # Preserve repository-relative paths so same-basename files cannot collide.
+    destination = _safe_model_path(filename)
     if destination.exists():
         raise HTTPException(409, f"文件已存在: {destination.name}")
     task = await asyncio.to_thread(download_tasks.create, repo_id, filename, str(destination))
+    with _download_cancel_lock:
+        _download_cancel_events[task["task_id"]] = threading.Event()
     background_executor.submit(_run_hf_download, task["task_id"], repo_id, filename, destination)
     return task
 
@@ -3704,6 +4034,25 @@ async def get_hugging_face_download(task_id: str):
     if not task:
         raise HTTPException(404, "下载任务不存在")
     return task
+
+
+@app.post("/api/hub/downloads/{task_id}/cancel")
+async def cancel_hugging_face_download(task_id: str):
+    task = await asyncio.to_thread(download_tasks.get, task_id)
+    if not task:
+        raise HTTPException(404, "下载任务不存在")
+    if task.get("state") in {"succeeded", "failed", "cancelled"}:
+        return task
+    with _download_cancel_lock:
+        event = _download_cancel_events.get(task_id)
+        if event is not None:
+            event.set()
+    await asyncio.to_thread(
+        download_tasks.update, task_id, state="cancelled", phase="cancelling", progress=100,
+        downloaded_bytes=int(task.get("downloaded_bytes") or 0),
+        total_bytes=int(task.get("total_bytes") or 0), error="用户取消下载",
+    )
+    return await asyncio.to_thread(download_tasks.get, task_id)
 
 
 @app.post("/api/upload")
@@ -4150,7 +4499,10 @@ async def list_engines():
             "parameter_config_version": e.get("parameter_config_version"),
             "profiles": e.get("profiles", {}),
             "load_strategy": e.get("load_strategy", {}),
-            "engine_environment": e.get("engine_environment", {}),
+            # Environment values may contain tokens or private endpoints. The
+            # deployment resolver keeps them server-side; public metadata only
+            # exposes the configured key names.
+            "engine_environment_keys": sorted(str(k) for k in (e.get("engine_environment") or {}).keys()),
             "type": e.get("type", "llama"),
         })
     return {"engines": result}

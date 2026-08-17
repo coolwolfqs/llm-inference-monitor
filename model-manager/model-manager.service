@@ -1,0 +1,24 @@
+[Unit]
+Description=Model Manager Catalog and Deployment Control Plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=draco
+Group=draco
+WorkingDirectory=/home/draco/model-manager
+EnvironmentFile=-/data/inference-control-plane/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=MODEL_MANAGER_APP_DIR=/home/draco/model-manager
+Environment=MODEL_MANAGER_MODELS_DIR=/data/models
+Environment=MODEL_MANAGER_CATALOG_TTL_SECONDS=60
+ExecStart=/home/draco/model-manager/venv/bin/python3 -m uvicorn app:app --workers 1 --host 127.0.0.1 --port 8093 --proxy-headers --forwarded-allow-ips=127.0.0.1 --log-level info
+Restart=on-failure
+RestartSec=2
+KillSignal=SIGINT
+TimeoutStopSec=20
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

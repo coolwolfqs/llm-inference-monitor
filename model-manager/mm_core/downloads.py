@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 import threading
 import time
@@ -47,11 +48,12 @@ class DownloadTaskStore:
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database, timeout=5.0)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA synchronous=NORMAL")
         return connection
 
     def create(self, repo_id: str, filename: str, target_path: str) -> dict[str, Any]:
         task_id = f"dl_{uuid.uuid4().hex}"
-        with self._lock, self._connect() as connection:
+        with self._lock, contextlib.closing(self._connect()) as connection:
             connection.execute(
                 """INSERT INTO download_tasks
                    (task_id,repo_id,filename,target_path,state,phase,progress,created_at)
@@ -64,7 +66,7 @@ class DownloadTaskStore:
                downloaded_bytes: int = 0, total_bytes: int = 0, error: str = "") -> None:
         now = time.time()
         terminal = state in {"succeeded", "failed", "cancelled"}
-        with self._lock, self._connect() as connection:
+        with self._lock, contextlib.closing(self._connect()) as connection:
             connection.execute(
                 """UPDATE download_tasks SET state=?,phase=?,progress=?,
                    downloaded_bytes=?,total_bytes=?,started_at=COALESCE(started_at,?),
@@ -74,6 +76,22 @@ class DownloadTaskStore:
             )
 
     def get(self, task_id: str) -> dict[str, Any] | None:
-        with self._lock, self._connect() as connection:
+        with self._lock, contextlib.closing(self._connect()) as connection:
             row = connection.execute("SELECT * FROM download_tasks WHERE task_id=?", (task_id,)).fetchone()
         return dict(row) if row else None
+
+    def prune(self, keep: int = 500, max_age_seconds: int = 30 * 86400) -> int:
+        """Bound completed download history while preserving active tasks."""
+        cutoff = time.time() - max(0, int(max_age_seconds))
+        keep = max(1, int(keep))
+        with self._lock, contextlib.closing(self._connect()) as connection:
+            cursor = connection.execute(
+                """DELETE FROM download_tasks
+                   WHERE state NOT IN ('queued','running') AND finished_at IS NOT NULL
+                     AND finished_at < ?
+                     AND sequence NOT IN (
+                       SELECT sequence FROM download_tasks ORDER BY sequence DESC LIMIT ?
+                     )""",
+                (cutoff, keep),
+            )
+            return int(cursor.rowcount or 0)

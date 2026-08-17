@@ -1,8 +1,13 @@
 package middleware
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"hash"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -10,11 +15,46 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// AuthMiddleware validates API key for protected endpoints.
+func sha256Hash() hash.Hash                    { return sha256.New() }
+func decodeBase64Raw(s string) ([]byte, error) { return base64.RawURLEncoding.DecodeString(s) }
+func encodeBase64Raw(b []byte) string          { return base64.RawURLEncoding.EncodeToString(b) }
+
+// sessionTokenValid validates an ihub_session cookie HMAC token.
+func sessionTokenValid(token string, adminKey string) bool {
+	if token == "" || adminKey == "" {
+		return false
+	}
+	decoded, err := decodeBase64Raw(token)
+	if err != nil {
+		return false
+	}
+	parts := strings.SplitN(string(decoded), ":", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	ts, sig := parts[0], parts[1]
+	mac := hmac.New(sha256Hash, []byte(adminKey))
+	mac.Write([]byte(ts))
+	expected := encodeBase64Raw(mac.Sum(nil))
+	if !hmac.Equal([]byte(sig), []byte(expected)) {
+		return false
+	}
+	// Parse timestamp and check 24h expiry
+	tsMs, err := strconv.ParseInt(ts, 10, 64)
+	if err != nil {
+		return false
+	}
+	age := time.Since(time.UnixMilli(tsMs))
+	return age >= 0 && age < 24*time.Hour
+}
+
+// AuthMiddleware validates API key for protected endpoints. Accepts either
+// X-Admin-Key header or ihub_session cookie (BFF session auth).
 func AuthMiddleware() gin.HandlerFunc {
 	adminKey := os.Getenv("ADMIN_KEY")
 
 	return func(c *gin.Context) {
+		// 1. Check X-Admin-Key header (backward compat for API clients)
 		key := c.GetHeader("X-Admin-Key")
 		if key == "" {
 			authHeader := c.GetHeader("Authorization")
@@ -24,19 +64,33 @@ func AuthMiddleware() gin.HandlerFunc {
 		}
 
 		if adminKey == "" {
-			c.Next()
-			return
-		}
-
-		if key == "" || key != adminKey {
-			c.JSON(http.StatusForbidden, gin.H{
-				"error":   "unauthorized",
-				"message": "Valid admin key required for this operation",
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error":   "auth_unconfigured",
+				"message": "ADMIN_KEY is not configured; write operation refused",
 			})
 			c.Abort()
 			return
 		}
-		c.Next()
+
+		// Accept valid header key
+		if key != "" && hmac.Equal([]byte(key), []byte(adminKey)) {
+			c.Next()
+			return
+		}
+
+		// 2. Check ihub_session cookie (BFF session auth)
+		if token, err := c.Cookie("ihub_session"); err == nil && token != "" {
+			if sessionTokenValid(token, adminKey) {
+				c.Next()
+				return
+			}
+		}
+
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   "unauthorized",
+			"message": "Valid admin key or session required for this operation",
+		})
+		c.Abort()
 	}
 }
 

@@ -9,6 +9,7 @@ must not reimplement these compatibility rules.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable
 
 
@@ -42,6 +43,37 @@ def _text_set(values: Any) -> set[str]:
     if not isinstance(values, (list, tuple, set)):
         return set()
     return {str(value).strip().lower() for value in values if str(value).strip()}
+
+
+def _canonical_artifact_id(reference: Any, artifacts: Iterable[dict[str, Any]]) -> str:
+    """Resolve a UI/legacy artifact reference to the current bundle's ID.
+
+    The API historically accepted a mixture of catalog IDs, file names and
+    absolute paths. Deployment planning must normalize those representations
+    before validating bundle membership; otherwise a stale path is reported as
+    a cross-model projector even when it points to the selected model's own
+    artifact.
+    """
+    wanted = str(reference or "").strip()
+    if not wanted:
+        return ""
+    matches: list[dict[str, Any]] = []
+    wanted_name = Path(wanted).name
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        references = {
+            str(artifact.get(key) or "").strip()
+            for key in ("id", "relative_path", "name", "path")
+            if str(artifact.get(key) or "").strip()
+        }
+        artifact_name = Path(str(artifact.get("name") or artifact.get("path") or "")).name
+        if wanted in references or (wanted_name and wanted_name == artifact_name):
+            matches.append(artifact)
+    if len(matches) != 1:
+        return ""
+    artifact = matches[0]
+    return str(artifact.get("id") or artifact.get("relative_path") or artifact.get("name") or "").strip()
 
 
 def _capability_set(model: dict[str, Any]) -> set[str]:
@@ -246,6 +278,10 @@ def resolve_deployment_plan(
         values.setdefault("spec_type", "none")
     explicit_projector = str(overrides.get("mmproj_file") or "").strip()
     explicit_visual_disable = "mmproj" in overrides and not bool(overrides.get("mmproj"))
+    if explicit_projector:
+        canonical_projector = _canonical_artifact_id(explicit_projector, projectors)
+        if canonical_projector:
+            values["mmproj_file"] = canonical_projector
     if (
         projectors
         and capabilities["vision"]

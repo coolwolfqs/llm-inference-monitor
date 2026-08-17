@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"inference-hub-v3/src/alert_manager/notifiers"
@@ -23,6 +24,8 @@ type AlertEngine struct {
 	rules     map[string]shared.AlertRule
 	states    map[string]*AlertState
 	notifiers map[string]notifiers.Notifier
+	stateMu   sync.RWMutex
+	notifySem chan struct{}
 }
 
 // NewAlertEngine creates a new alert engine
@@ -31,6 +34,7 @@ func NewAlertEngine(cfg *shared.AlertConfig) *AlertEngine {
 		rules:     cfg.Rules,
 		states:    make(map[string]*AlertState),
 		notifiers: make(map[string]notifiers.Notifier),
+		notifySem: make(chan struct{}, 8),
 	}
 
 	// Initialize notifiers
@@ -68,9 +72,9 @@ func NewAlertEngine(cfg *shared.AlertConfig) *AlertEngine {
 
 // Evaluate checks all rules against current metrics
 func (ae *AlertEngine) Evaluate(metrics map[string]float64) []shared.AlertRule {
+	ae.stateMu.Lock()
+	defer ae.stateMu.Unlock()
 	var triggered []shared.AlertRule
-
-	shared.Infof("[AlertEngine] evaluating %d rules against %d metrics", len(ae.rules), len(metrics))
 
 	for name, rule := range ae.rules {
 		if !rule.Enabled {
@@ -88,10 +92,8 @@ func (ae *AlertEngine) Evaluate(metrics map[string]float64) []shared.AlertRule {
 			ae.states[name] = state
 		}
 
-		// Evaluate condition
+		// Evaluate condition (only state transitions are logged downstream)
 		satisfied := false
-		shared.Infof("[AlertEngine] rule %s: metric=%s value=%.2f threshold=%.2f condition=%s",
-			name, rule.Metric, value, rule.Threshold, rule.Condition)
 		switch rule.Condition {
 		case "gt":
 			satisfied = value > rule.Threshold
@@ -140,6 +142,9 @@ func (ae *AlertEngine) Evaluate(metrics map[string]float64) []shared.AlertRule {
 }
 
 func (ae *AlertEngine) sendNotification(rule shared.AlertRule, message string, value float64) {
+	// Notifiers hit remote webhooks with their own timeouts. Use a bounded
+	// semaphore and return immediately so a slow or unavailable webhook cannot
+	// block the five-second evaluator or grow unbounded goroutines.
 	for _, channel := range rule.Channels {
 		notifier, exists := ae.notifiers[channel]
 		if !exists {
@@ -155,16 +160,32 @@ func (ae *AlertEngine) sendNotification(rule shared.AlertRule, message string, v
 			Timestamp: time.Now(),
 		}
 
-		if err := notifier.Send(alert); err != nil {
-			shared.Errorf("[AlertEngine] failed to send alert via %s: %v", channel, err)
-		} else {
-			shared.Infof("[AlertEngine] alert sent via %s: %s", channel, message)
+		select {
+		case ae.notifySem <- struct{}{}:
+		default:
+			shared.Warnf("[AlertEngine] notification queue full; dropping %s", channel)
+			continue
 		}
+		go func(ch string, n notifiers.Notifier, a notifiers.Alert) {
+			defer func() { <-ae.notifySem }()
+			defer func() {
+				if r := recover(); r != nil {
+					shared.Errorf("[AlertEngine] notifier panic via %s: %v", ch, r)
+				}
+			}()
+			if err := n.Send(a); err != nil {
+				shared.Errorf("[AlertEngine] failed to send alert via %s: %v", ch, err)
+			} else {
+				shared.Infof("[AlertEngine] alert sent via %s: %s", ch, message)
+			}
+		}(channel, notifier, alert)
 	}
 }
 
 // GetState returns the current state of all alerts
 func (ae *AlertEngine) GetState() map[string]map[string]interface{} {
+	ae.stateMu.RLock()
+	defer ae.stateMu.RUnlock()
 	result := make(map[string]map[string]interface{})
 
 	for name, state := range ae.states {

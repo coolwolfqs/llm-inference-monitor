@@ -65,6 +65,9 @@ export const api = {
   rescan: () => request('/catalog/rescan', { method: 'POST' }),
   deploy: (payload: DeployPayload) => request<{ task_id: string }>('/deployments', { method: 'POST', body: JSON.stringify(payload) }),
   deployment: (taskId: string) => request<{ state: string; progress: number; phase: string; error?: string }>(`/deployments/${encodeURIComponent(taskId)}`),
+  cancelDownload: (taskId: string) => request<{ state: string; phase: string }>(
+    `/hub/downloads/${encodeURIComponent(taskId)}/cancel`, { method: 'POST' },
+  ),
   upload: (file: File) => {
     const data = new FormData()
     data.append('file', file)

@@ -1,7 +1,14 @@
 .PHONY: build run clean test dev docker frontend
 
 build:
-	cd src/gateway && go build -o ../../inference-hub-v3 .
+	@set -eu; \
+	commit=$$(git rev-parse --short HEAD); \
+	tree=$$(git rev-parse HEAD^{tree}); \
+	state=clean; test -z "$$(git status --porcelain --untracked-files=all)" || state=dirty; \
+	built=$$(date -u +%Y-%m-%dT%H:%M:%SZ); \
+	cd src/gateway && go build -trimpath -ldflags "-X main.buildCommit=$$commit -X main.buildTree=$$tree -X main.buildTime=$$built -X main.buildState=$$state" -o ../../inference-hub-v3.new .; \
+	test -x ../../inference-hub-v3.new; \
+	mv -f ../../inference-hub-v3.new ../../inference-hub-v3
 
 run: build
 	./inference-hub-v3

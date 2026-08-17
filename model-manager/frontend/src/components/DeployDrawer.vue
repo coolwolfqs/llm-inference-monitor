@@ -4,7 +4,7 @@ import { CheckCircle2, ChevronDown, Rocket, XCircle } from 'lucide-vue-next'
 import { api } from '../services/api'
 import type { DeployPayload, DeploymentPlan, Engine, EngineParameter, ModelArtifact, Preflight, ProjectionArtifact, RuntimeConfig } from '../types/model'
 
-const props = defineProps<{ model: ModelArtifact; currentConfig: RuntimeConfig }>()
+const props = defineProps<{ model: ModelArtifact; currentConfig: RuntimeConfig; isCurrent?: boolean }>()
 const emit = defineEmits<{ close: []; deployed: [taskId: string] }>()
 const preflight = ref<Preflight>()
 // Preflight is for compatibility and display. The deployment-plan response is
@@ -58,7 +58,9 @@ const form = reactive<DeployPayload>({
   v_cache_type: props.currentConfig.v_cache_type || 'q8_0',
   batch: props.currentConfig.batch || 1024,
   ubatch: props.currentConfig.ubatch || 512,
-  flash_attn: props.currentConfig.flash_attn ?? true,
+  flash_attn: props.currentConfig.flash_attn == null
+    ? true
+    : props.currentConfig.flash_attn === true || String(props.currentConfig.flash_attn).toLowerCase() === 'on',
   chunked_batch: true,
   threads: props.currentConfig.threads || 8,
   threads_http: 4,
@@ -115,6 +117,7 @@ const supportedEngineParameterCount = computed(() => engineParameterSchema.value
 const engineProfiles = computed(() => selectedEngineMatch.value?.profiles || selectedEngine.value?.profiles || {})
 const profileOptions = computed(() => Object.entries(engineProfiles.value).filter(([, profile]) => profile.compatible !== false))
 const selectedProfile = computed(() => engineProfiles.value[profileId.value])
+const observedRuntime = computed(() => Boolean(props.isCurrent && (props.currentConfig.pid || props.currentConfig.model_path)))
 const contextPerSlotLimit = computed(() => {
   const canonicalTotal = Number(canonicalPlan.value?.limits?.ctx_size_max || 0)
   const canonicalSlots = Math.max(1, Number(canonicalPlan.value?.parameters?.concurrency || 1))
@@ -138,10 +141,17 @@ const selectedProfileLabel = computed(() => {
   const comparisons: Array<[string, unknown]> = [
     ['ctx_size', form.ctx_size],
     ['concurrency', form.concurrency],
+    ['batch', form.batch],
+    ['ubatch', form.ubatch],
+    ['device', form.device],
+    ['k_cache_type', form.k_cache_type],
+    ['v_cache_type', form.v_cache_type],
+    ['flash_attn', form.flash_attn],
+    ['chunked_batch', form.chunked_batch],
     ['spec_draft_n_max', form.spec_draft_n_max],
     ['fit', form.fit],
   ]
-  const matches = comparisons.every(([key, actual]) => planned[key] === undefined || String(planned[key]) === String(actual))
+  const matches = comparisons.every(([key, actual]) => planned[key] === undefined || comparisonValue(key, planned[key]) === comparisonValue(key, actual))
   if (!matches) return '自定义调度'
   return selectedProfile.value?.label || (profileId.value === 'default' ? '最佳默认' : profileId.value)
 })
@@ -267,10 +277,17 @@ const managedFormAliases: Record<string, string> = {
 }
 
 function normalizeFormDefault(key: string, value: unknown) {
-  if (key === 'flash_attn') {
-    return value === true || String(value).toLowerCase() === 'on'
+  if (key === 'flash_attn' || key === 'chunked_batch') {
+    return value === true || ['on', 'true', '1', 'yes'].includes(String(value).toLowerCase())
   }
   return value
+}
+
+function comparisonValue(key: string, value: unknown) {
+  if (key === 'flash_attn' || key === 'chunked_batch') {
+    return value === true || ['on', 'true', '1', 'yes'].includes(String(value).toLowerCase())
+  }
+  return value === null || value === undefined ? '' : String(value)
 }
 
 function applyEngineProfile() {
@@ -366,18 +383,41 @@ function restoreRememberedConfig(config?: RememberedDeployConfig) {
   keepCacheSelection()
 }
 
+function restoreObservedRuntimeConfig() {
+  if (!observedRuntime.value) return
+  const formRecord = form as unknown as Record<string, unknown>
+  for (const [parameterKey, formKey] of Object.entries(managedFormAliases)) {
+    if (!Object.prototype.hasOwnProperty.call(props.currentConfig, parameterKey)) continue
+    const value = props.currentConfig[parameterKey as keyof RuntimeConfig]
+    if (value !== undefined && value !== null) formRecord[formKey] = normalizeFormDefault(parameterKey, value)
+  }
+  if (Object.prototype.hasOwnProperty.call(props.currentConfig, 'mmproj_file')) {
+    const projector = projectorForValue(String(props.currentConfig.mmproj_file || ''))
+    form.mmproj_file = projector?.id || ''
+  }
+  const specType = String(props.currentConfig.spec_type || '')
+  mtpEnabled.value = specType.includes('draft-mtp') && mtpAvailable.value
+  ngramEnabled.value = specType.includes('ngram') && selectedEngine.value?.supports_ngram !== false
+  form.mmproj = Boolean(props.currentConfig.mmproj ?? form.mmproj_file)
+  keepCacheSelection()
+}
+
 function selectEngineDefaults(engine: string) {
   if (!engine || !engines.value.length) return
   restoringConfig.value = true
   const remembered = readRememberedConfig(engine)
   const rememberedProfile = remembered?.profile_id
   profileId.value = rememberedProfile && engineProfiles.value[rememberedProfile] ? rememberedProfile : 'default'
+  const preserveObserved = observedRuntime.value
+    && !remembered
+    && String(props.currentConfig.llama_version || '') === engine
   applyEngineProfile()
+  if (preserveObserved) restoreObservedRuntimeConfig()
   restoreRememberedConfig(remembered)
   keepCacheSelection()
   restoringConfig.value = false
   persistenceReady.value = true
-  void loadCanonicalPlan(engine, profileId.value, !remembered)
+  void loadCanonicalPlan(engine, profileId.value, !remembered && !preserveObserved)
 }
 
 function persistRememberedConfig() {
@@ -533,8 +573,7 @@ onMounted(async () => {
     form.engine = check.default_engine || check.compatible_engines[0] || 'llama'
     const rememberedEngine = window.localStorage.getItem('model-manager:last-engine')
     const engineCandidates = [
-      rememberedEngine,
-      props.currentConfig.llama_version,
+      ...(props.isCurrent ? [props.currentConfig.llama_version, rememberedEngine] : [rememberedEngine, props.currentConfig.llama_version]),
       check.default_llama_version,
       ...(check.compatible_llama_versions || []),
       engines.value.find((item) => item.key === 'vulkan')?.key,
@@ -608,6 +647,7 @@ async function submit() {
           <label class="full-field"><span>引擎</span><select v-model="form.llama_version"><option v-for="engine in engines" :key="engine.key" :value="engine.key">{{ engine.name }} · {{ engine.version }}</option></select></label>
           <label v-if="profileOptions.length" class="full-field"><span>调度方案</span><select v-model="profileId"><option v-for="([key, profile]) in profileOptions" :key="key" :value="key">{{ profile.label || key }}</option></select></label>
           <p v-if="restoredRememberedConfig" class="config-memory">已恢复此模型 + 引擎的最近一次配置</p>
+          <p v-else-if="observedRuntime" class="config-memory">已载入当前 llama-server 进程参数；profile 只作为比较基线，实际差异会保留。</p>
           <details v-if="selectedEngine" class="inline-details">
             <summary>更多引擎信息 <ChevronDown :size="15" /></summary>
             <div class="feature-row"><span v-for="feature in selectedEngine.features" :key="feature">{{ feature }}</span></div>
@@ -651,7 +691,7 @@ async function submit() {
         </section>
 
         <details class="advanced-panel">
-          <summary>高级参数（共性） <ChevronDown :size="16" /></summary>
+          <summary>高级参数 <ChevronDown :size="16" /></summary>
           <p class="parameter-panel-help">这里仅放所有引擎通用的性能、KV Cache、加载和服务参数；不支持的字段会自动隐藏。</p>
           <div class="form-grid advanced-grid">
             <label><span>K Cache</span><select v-model="form.k_cache_type"><option v-for="v in cacheTypes" :key="v" :value="v">{{ v }}</option></select></label>
@@ -698,7 +738,7 @@ async function submit() {
           </section>
         </details>
         <details class="advanced-panel engine-parameters-panel">
-          <summary>拓展配置（引擎/模型） <ChevronDown :size="16" /></summary>
+          <summary>拓展配置 <ChevronDown :size="16" /></summary>
           <p class="parameter-panel-help">这里仅显示当前引擎或模型专属参数；新增引擎优先通过参数文件扩展，不改变共性页面结构。</p>
           <template v-if="extensionParameterGroups.length">
             <section v-for="group in extensionParameterGroups" :key="group.name" class="parameter-group">

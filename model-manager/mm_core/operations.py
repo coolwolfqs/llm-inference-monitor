@@ -79,3 +79,18 @@ class OperationStore:
                 "SELECT COALESCE(MAX(sequence),0) FROM operations"
             ).fetchone()
         return int(row[0])
+
+    def prune(self, keep: int = 1000, max_age_seconds: int = 30 * 86400) -> int:
+        """Bound history growth without touching active operations."""
+        cutoff = time.time() - max(0, int(max_age_seconds))
+        keep = max(1, int(keep))
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """DELETE FROM operations
+                   WHERE finished_at IS NOT NULL AND finished_at < ?
+                     AND sequence NOT IN (
+                       SELECT sequence FROM operations ORDER BY sequence DESC LIMIT ?
+                     )""",
+                (cutoff, keep),
+            )
+            return int(cursor.rowcount or 0)

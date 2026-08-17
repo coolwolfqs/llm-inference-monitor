@@ -45,25 +45,14 @@ func NewGPUCollector(base *BaseCollector, httpClient *shared.HTTPClient) *GPUCol
 	return c
 }
 
-// detectVendor identifies the GPU vendor via nvidia-smi → rocm-smi → sysfs
+// detectVendor identifies the GPU vendor from the kernel device identity first.
+// The host deliberately exposes an AMD-compatible nvidia-smi shim, so command
+// output cannot be treated as proof that an NVIDIA device exists.
 func (c *GPUCollector) detectVendor() string {
-	// Try nvidia-smi
-	if out, err := exec.Command("sh", "-c", "nvidia-smi --query-gpu=count --format=csv,noheader 2>/dev/null").Output(); err == nil {
-		outStr := strings.TrimSpace(string(out))
-		if outStr != "" && !strings.Contains(outStr, "has failed") {
-			return "nvidia"
-		}
-	}
-	// Try rocm-smi
-	if out, err := exec.Command("sh", "-c", "rocm-smi --showproductname 2>/dev/null").Output(); err == nil {
-		if strings.Contains(string(out), "Card:") {
-			return "amd"
-		}
-	}
 	// Try sysfs DRM vendor IDs
 	if dirs, err := os.ReadDir("/sys/class/drm/"); err == nil {
 		for _, d := range dirs {
-			if !strings.HasPrefix(d.Name(), "card") || strings.HasSuffix(d.Name(), "-") {
+			if !strings.HasPrefix(d.Name(), "card") || strings.Contains(d.Name(), "-") {
 				continue
 			}
 			vendorPath := filepath.Join("/sys/class/drm", d.Name(), "device", "vendor")
@@ -80,6 +69,19 @@ func (c *GPUCollector) detectVendor() string {
 			case "0x8086":
 				return "intel"
 			}
+		}
+	}
+	// Try rocm-smi before nvidia-smi because an AMD compatibility shim may
+	// intentionally return NVIDIA-shaped output on ROCm hosts.
+	if out, err := exec.Command("sh", "-c", "rocm-smi --showproductname 2>/dev/null").Output(); err == nil {
+		if strings.Contains(string(out), "Card:") {
+			return "amd"
+		}
+	}
+	if out, err := exec.Command("sh", "-c", "nvidia-smi --query-gpu=count --format=csv,noheader 2>/dev/null").Output(); err == nil {
+		outStr := strings.TrimSpace(string(out))
+		if outStr != "" && !strings.Contains(outStr, "has failed") {
+			return "nvidia"
 		}
 	}
 	return "unknown"

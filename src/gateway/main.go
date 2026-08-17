@@ -4,6 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -39,6 +42,16 @@ import (
 // Global KV engine instance
 var globalKVEngine *kv_engine.KVEngine
 var buildCommit = "unknown"
+var buildTree = "unknown"
+var buildTime = "unknown"
+var buildState = "unknown"
+var artifactSHA256 = "unknown"
+const releaseVersion = "v0.5"
+
+// The alert engine is process-owned so the status endpoint can expose the
+// same state that the five-second evaluator updates. It is assigned during
+// startup before the HTTP server begins accepting requests.
+var globalAlertEngine *alert_manager.AlertEngine
 
 // Global GPU collector for multi-vendor support
 var globalGPUCollector *collectors.GPUCollector
@@ -88,6 +101,7 @@ const engineCapabilityTTL = 10 * time.Minute
 
 func main() {
 	shared.Infof("InferenceHub v3 starting...")
+	artifactSHA256 = executableSHA256()
 	globalNewAPIParser = shared.NewNewAPIParser()
 
 	cfg, err := shared.LoadConfig("configs")
@@ -118,6 +132,7 @@ func main() {
 
 	// Initialize alert engine
 	alertEngine := alert_manager.NewAlertEngine(&cfg.Alerts)
+	globalAlertEngine = alertEngine
 	shared.Infof("Alert engine initialized (%d rules)", len(cfg.Alerts.Rules))
 
 	// Start alert evaluation goroutine
@@ -128,6 +143,7 @@ func main() {
 	}
 
 	router := setupRouter(cfg, store, httpClient, globalKVEngine)
+	setupSessionRoutes(router, apiKey)
 	startV2EventBroadcaster(cfg, httpClient)
 
 	addr := cfg.DashboardAddr()
@@ -158,6 +174,34 @@ func main() {
 		}()
 	}
 
+	// HTTPS listener on :8443 (dual-stack with HTTP :8081)
+	certPath := strings.TrimSpace(os.Getenv("TLS_CERT_PATH"))
+	keyPath := strings.TrimSpace(os.Getenv("TLS_KEY_PATH"))
+	if certPath == "" {
+		certPath = "/data/inference-hub-v3/certs/server.crt"
+	}
+	if keyPath == "" {
+		keyPath = "/data/inference-hub-v3/certs/server.key"
+	}
+	var tlsSrv *http.Server
+	if cert, err := tls.LoadX509KeyPair(certPath, keyPath); err == nil {
+		tlsAddr := cfg.Services.Dashboard.Listen + ":8443"
+		tlsSrv = &http.Server{
+			Addr:        tlsAddr,
+			Handler:     router,
+			TLSConfig:   &tls.Config{Certificates: []tls.Certificate{cert}},
+			BaseContext: baseContext,
+		}
+		go func() {
+			shared.Infof("HTTPS listening on %s", tlsAddr)
+			if err := tlsSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+				shared.Errorf("HTTPS server error: %v", err)
+			}
+		}()
+	} else {
+		shared.Infof("TLS certs not loaded (%v); HTTPS listener not started", err)
+	}
+
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
@@ -179,6 +223,23 @@ func main() {
 	}
 	stopV2EventBroadcaster()
 	shared.Infof("Server exited")
+}
+
+func executableSHA256() string {
+	executable, err := os.Executable()
+	if err != nil {
+		return "unknown"
+	}
+	file, err := os.Open(executable)
+	if err != nil {
+		return "unknown"
+	}
+	defer file.Close()
+	digest := sha256.New()
+	if _, err := io.Copy(digest, file); err != nil {
+		return "unknown"
+	}
+	return hex.EncodeToString(digest.Sum(nil))
 }
 
 func shutdownHTTPServers(servers []*http.Server, grace time.Duration) {
@@ -331,6 +392,7 @@ func setupRouter(cfg *shared.Config, store *shared.MetricsStore, httpClient *sha
 	r.Use(staticAssetHeaders())
 
 	authMW := middleware.AuthMiddleware()
+	rateMW := middleware.RateLimitMiddleware(20, 60) // 20 req/s, burst 60
 
 	r.Static("/assets", "./static/assets")
 	r.Static("/static", "/data/dashboard/static")
@@ -341,7 +403,19 @@ func setupRouter(cfg *shared.Config, store *shared.MetricsStore, httpClient *sha
 	{
 		// ── 基础设施 ──
 		api.GET("/health", func(c *gin.Context) {
-			c.JSON(200, gin.H{"status": "ok", "version": "v3.1.0", "build_commit": buildCommit, "time": time.Now().Format("2006-01-02 15:04:05"), "freshness": collectorFreshness()})
+			c.JSON(200, gin.H{
+				"status":          "ok",
+				"version":         "v3.1.0",
+				"release_version": releaseVersion,
+				"build_commit":    buildCommit,
+				"build_tree":      buildTree,
+				"build_time":      buildTime,
+				"build_state":     buildState,
+				"artifact_sha256": artifactSHA256,
+				"time":            time.Now().Format("2006-01-02 15:04:05"),
+				"freshness":       collectorFreshness(),
+				"metrics_dropped": store.DroppedCount(),
+			})
 		})
 		api.GET("/node/identity", handleNodeIdentity())
 		api.GET("/schema/metrics", func(c *gin.Context) { c.JSON(200, shared.MetricDefinitions()) })
@@ -353,9 +427,9 @@ func setupRouter(cfg *shared.Config, store *shared.MetricsStore, httpClient *sha
 		{
 			models.GET("", handleGetModels(cfg, httpClient))
 			models.GET("/list", handleLegacyModelsList(cfg, httpClient))
-			models.POST("/deploy", authMW, handleProxyDeploy(cfg, httpClient))
-			models.POST("/switch", authMW, handleSwitchModel(cfg, httpClient))
-			models.POST("/stop", authMW, handleStopModel(cfg, httpClient))
+			models.POST("/deploy", authMW, rateMW, handleProxyDeploy(cfg, httpClient))
+			models.POST("/switch", authMW, rateMW, handleSwitchModel(cfg, httpClient))
+			models.POST("/stop", authMW, rateMW, handleStopModel(cfg, httpClient))
 		}
 
 		// ── 引擎管理 ──
@@ -363,27 +437,27 @@ func setupRouter(cfg *shared.Config, store *shared.MetricsStore, httpClient *sha
 		{
 			engines.GET("", handleGetEngines(cfg, httpClient))
 			engines.GET("/active", handleGetActiveEngine(cfg, httpClient))
-			engines.POST("/switch", authMW, handleSwitchEngine(cfg, httpClient))
+			engines.POST("/switch", authMW, rateMW, handleSwitchEngine(cfg, httpClient))
 		}
 		api.GET("/engine/active", handleGetActiveEngine(cfg, httpClient))
-		api.POST("/engine/switch", authMW, handleSwitchEngine(cfg, httpClient))
+		api.POST("/engine/switch", authMW, rateMW, handleSwitchEngine(cfg, httpClient))
 
 		// ── 配置管理 ──
 		settings := api.Group("/settings")
 		{
 			settings.GET("/persist", handleGetPersist(cfg, httpClient))
-			settings.POST("/persist", authMW, handleSetPersist(cfg, httpClient))
+			settings.POST("/persist", authMW, rateMW, handleSetPersist(cfg, httpClient))
 			settings.GET("/params", handleGetLlamaParams(cfg, httpClient))
-			settings.POST("/params", authMW, handleSetLlamaParams(cfg, httpClient))
+			settings.POST("/params", authMW, rateMW, handleSetLlamaParams(cfg, httpClient))
 		}
 
 		// ── 快速切换 ──
 		qs := api.Group("/quick-switch")
 		{
 			qs.GET("", handleProxyQuickSwitchGet(cfg, httpClient))
-			qs.POST("", authMW, handleProxyQuickSwitchPost(cfg, httpClient))
-			qs.POST("/add-recent", authMW, handleProxyAddRecent(cfg, httpClient))
-			qs.POST("/toggle-fav", authMW, handleProxyToggleFav(cfg, httpClient))
+			qs.POST("", authMW, rateMW, handleProxyQuickSwitchPost(cfg, httpClient))
+			qs.POST("/add-recent", authMW, rateMW, handleProxyAddRecent(cfg, httpClient))
+			qs.POST("/toggle-fav", authMW, rateMW, handleProxyToggleFav(cfg, httpClient))
 		}
 
 		// ── GPU 管理 ──
@@ -398,7 +472,7 @@ func setupRouter(cfg *shared.Config, store *shared.MetricsStore, httpClient *sha
 				c.JSON(200, gin.H{"gpus": gpus.GPUs, "count": len(gpus.GPUs)})
 			})
 			gpu.GET("/info", handleGetGPUInfo(cfg))
-			gpu.POST("/power_limit", authMW, handleGPUPowerLimit())
+			gpu.POST("/power_limit", authMW, rateMW, handleGPUPowerLimit())
 		}
 
 		// ── 算力详情 ──
@@ -411,10 +485,10 @@ func setupRouter(cfg *shared.Config, store *shared.MetricsStore, httpClient *sha
 		kv := api.Group("/kv-baseline")
 		{
 			kv.GET("/status", handleKVBaselineStatus())
-			kv.POST("/refresh", authMW, handleKVBaselineRefresh())
+			kv.POST("/refresh", authMW, rateMW, handleKVBaselineRefresh())
 		}
 		api.GET("/kv_baseline/status", handleKVBaselineStatus())
-		api.POST("/kv_baseline/refresh", authMW, handleKVBaselineRefresh())
+		api.POST("/kv_baseline/refresh", authMW, rateMW, handleKVBaselineRefresh())
 
 		// ── KV Cache ──
 		api.GET("/kv-cache", handleKVCache(cfg))
@@ -433,14 +507,18 @@ func setupRouter(cfg *shared.Config, store *shared.MetricsStore, httpClient *sha
 		// ── 系统操作 ──
 		system := api.Group("/system")
 		{
-			system.POST("/:action", authMW, handleSystemAction(cfg))
+			system.POST("/:action", authMW, rateMW, handleSystemAction(cfg))
 		}
+		// The active dashboard uses the shorter /api/action/* contract. Keep it
+		// as an authenticated alias of the established system handler so old API
+		// clients remain compatible while the UI and gateway converge.
+		api.POST("/action/:action", authMW, rateMW, handleSystemAction(cfg))
 
 		// ── 指标查询 ──
 		metrics := api.Group("/metrics")
 		{
-			metrics.GET("/query", authMW, handleMetricsQuery())
-			metrics.GET("/query_range", authMW, handleMetricsQueryRange())
+			metrics.GET("/query", authMW, rateMW, handleMetricsQuery())
+			metrics.GET("/query_range", authMW, rateMW, handleMetricsQueryRange())
 		}
 
 		// ── 基准测试 ──
@@ -478,7 +556,7 @@ func setupRouter(cfg *shared.Config, store *shared.MetricsStore, httpClient *sha
 		alerts := api.Group("/alerts")
 		{
 			alerts.GET("/status", handleAlertStatus())
-			alerts.POST("/test", authMW, handleTestAlert())
+			alerts.POST("/test", authMW, rateMW, handleTestAlert())
 		}
 	}
 
@@ -525,7 +603,11 @@ func staticAssetHeaders() gin.HandlerFunc {
 
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := strings.TrimSpace(c.GetHeader("Origin"))
+		if origin != "" && corsOriginAllowed(origin) {
+			c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
+			c.Writer.Header().Add("Vary", "Origin")
+		}
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Admin-Key")
 		if c.Request.Method == "OPTIONS" {
@@ -534,6 +616,24 @@ func corsMiddleware() gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+func corsOriginAllowed(origin string) bool {
+	raw := strings.TrimSpace(os.Getenv("CORS_ALLOWED_ORIGINS"))
+	allowed := []string{
+		"http://10.1.1.4:9092", "http://10.1.1.4:8081",
+		"http://127.0.0.1:9092", "http://127.0.0.1:8081",
+		"http://localhost:9092", "http://localhost:8081",
+	}
+	if raw != "" {
+		allowed = strings.Split(raw, ",")
+	}
+	for _, candidate := range allowed {
+		if strings.TrimSpace(candidate) == origin {
+			return true
+		}
+	}
+	return false
 }
 
 // ===== Metrics Query =====
@@ -1694,14 +1794,17 @@ func buildOverviewData(cfg *shared.Config, hc *shared.HTTPClient) gin.H {
 	return data
 }
 
-// Cache docker container list (5s TTL)
+// Cache docker container list (30s TTL), guarded for concurrent requests.
 var (
+	dockerCacheMu         sync.Mutex
 	_dockerContainers     map[string]bool
 	_dockerContainersTime time.Time
 	_dockerContainersTTL  = 30 * time.Second
 )
 
 func getCachedDockerContainers() map[string]bool {
+	dockerCacheMu.Lock()
+	defer dockerCacheMu.Unlock()
 	if _dockerContainers != nil && time.Since(_dockerContainersTime) < _dockerContainersTTL {
 		return _dockerContainers
 	}
@@ -2265,14 +2368,17 @@ func buildServicesPanelData(cfg *shared.Config) gin.H {
 
 // ===== Helper Functions for Enriched Panels =====
 
-// Cache parseLlamaScript result (10s TTL)
+// Cache parseLlamaScript result (60s TTL), guarded for concurrent requests.
 var (
+	parseScriptMu     sync.Mutex
 	_parseScriptCache map[string]interface{}
 	_parseScriptTime  time.Time
 	_parseScriptTTL   = 60 * time.Second
 )
 
 func parseLlamaScript() map[string]interface{} {
+	parseScriptMu.Lock()
+	defer parseScriptMu.Unlock()
 	if _parseScriptCache != nil && time.Since(_parseScriptTime) < _parseScriptTTL {
 		return _parseScriptCache
 	}
@@ -2410,7 +2516,14 @@ func buildServicesMap(cfg *shared.Config) map[string]string {
 		go func(n, u string) {
 			defer wg.Done()
 			client := &http.Client{Timeout: 3 * time.Second}
-			resp, err := client.Get(u)
+			req, _ := http.NewRequest(http.MethodGet, u, nil)
+			// llama-server requires Bearer auth on 8080 (direct connection).
+			if n == "llama-server" {
+				if k := cfg.GetAPIKey(); k != "" {
+					req.Header.Set("Authorization", "Bearer "+k)
+				}
+			}
+			resp, err := client.Do(req)
 			if err != nil {
 				mu.Lock()
 				result[n] = "down"
@@ -3109,14 +3222,16 @@ func handleSwitchModel(cfg *shared.Config, httpClient *shared.HTTPClient) gin.Ha
 			return
 		}
 
-		mmURL := cfg.Services.ModelManager.URL
-		resp, err := httpClient.Post(mmURL+"/api/models/switch", bytes.NewReader(body))
-		if err != nil {
-			c.JSON(500, gin.H{"error": err.Error()})
-			return
-		}
-		defer resp.Body.Close()
-		c.DataFromReader(resp.StatusCode, resp.ContentLength, resp.Header.Get("Content-Type"), resp.Body, nil)
+		// The upstream /api/models/switch contract does not exist in the
+		// current model-manager (it was only present in the retired Python
+		// dashboard). Returning a passthrough 404/500 would mask the contract
+		// gap: surface it explicitly and point to the live deploy API.
+		_ = body
+		c.JSON(http.StatusNotImplemented, gin.H{
+			"error":  "endpoint_retired",
+			"detail": "POST /api/models/switch is not implemented by model-manager",
+			"use":    "POST /api/models/deploy or POST /api/deployments",
+		})
 	}
 }
 
@@ -3288,42 +3403,42 @@ func handleComputeProcesses() gin.HandlerFunc {
 
 func handleKVBaselineStatus() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		baselinePath := filepath.Join("/tmp", "kv_baseline.json")
-		if _, err := os.Stat(baselinePath); os.IsNotExist(err) {
-			c.JSON(200, gin.H{"baseline": nil, "captured": false})
+		// Report the KV engine's real in-memory baseline instead of the old
+		// /tmp/kv_baseline.json placeholder file (which never reflected the
+		// engine state and made the API look healthy when nothing was captured).
+		if globalKVEngine == nil {
+			c.JSON(200, gin.H{"baseline": nil, "meta": nil, "captured": false})
 			return
 		}
-
-		data, err := os.ReadFile(baselinePath)
-		if err != nil {
-			c.JSON(500, gin.H{"error": err.Error()})
-			return
-		}
-
-		var baseline interface{}
-		json.Unmarshal(data, &baseline)
-
-		c.JSON(200, gin.H{"baseline": baseline, "captured": true})
+		st := globalKVEngine.GetStatus()
+		c.JSON(200, gin.H{
+			"baseline": st["baseline"],
+			"meta":     st["meta"],
+			"captured": st["captured"],
+			"source":   "kv_engine.in_memory",
+		})
 	}
 }
 
 func handleKVBaselineRefresh() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		cfg := shared.GetConfig()
-		if cfg == nil {
-			c.JSON(500, gin.H{"error": "config not loaded"})
+		if globalKVEngine == nil {
+			c.JSON(500, gin.H{"error": "KV engine not initialized"})
 			return
 		}
 
-		baselinePath := filepath.Join("/tmp", "kv_baseline.json")
-		baseline := map[string]interface{}{
-			"captured_at": time.Now().Unix(),
-			"status":      "refreshed",
+		numGPUs := 0
+		if gpus := cachedGPUData(shared.GetConfig()); gpus != nil {
+			numGPUs = len(gpus.GPUs)
 		}
-		data, _ := json.Marshal(baseline)
-		os.WriteFile(baselinePath, data, 0644)
+		if numGPUs <= 0 {
+			numGPUs = 1
+		}
 
-		c.JSON(200, gin.H{"status": "ok", "path": baselinePath})
+		// CaptureBaseline can take tens of seconds (stability sampling);
+		// run it in the background and confirm the request immediately.
+		c.JSON(202, gin.H{"status": "capturing", "detail": "baseline capture started in background"})
+		go globalKVEngine.ForceCapture(numGPUs)
 	}
 }
 
@@ -3599,16 +3714,16 @@ func handleSetLlamaParams(cfg *shared.Config, httpClient *shared.HTTPClient) gin
 			return
 		}
 
-		// 通过 model-manager 更新参数
-		mmURL := cfg.Services.ModelManager.URL
-		resp, err := postModelManagerJSON(c, httpClient, mmURL+"/api/settings/params", body)
-		if err != nil {
-			// 如果 model-manager 不可用，直接返回
-			c.JSON(200, gin.H{"status": "params_updated", "note": "需要重启 llama-server 生效"})
-			return
-		}
-		defer resp.Body.Close()
-		c.DataFromReader(resp.StatusCode, resp.ContentLength, resp.Header.Get("Content-Type"), resp.Body, nil)
+		// The upstream /api/settings/params endpoint does not exist in the
+		// current model-manager. Previously an upstream failure returned a fake
+		// 200 "params_updated", silently dropping the change while the UI showed
+		// success. Fail loudly instead and point to the real deployment flow.
+		_ = body
+		c.JSON(http.StatusNotImplemented, gin.H{
+			"error":  "endpoint_retired",
+			"detail": "POST /api/settings/params is not implemented by model-manager",
+			"use":    "POST /api/models/deploy with deployment parameters (via model-manager)",
+		})
 	}
 }
 
@@ -3768,12 +3883,90 @@ func v2SystemSection(sys *shared.SystemMetrics) gin.H {
 	return result
 }
 
-func v2DeploymentSection() gin.H {
+type observedRuntimePayload struct {
+	ServerRunning     bool                   `json:"server_running"`
+	RuntimeSource     string                 `json:"runtime_source"`
+	RuntimeObservedAt float64                `json:"runtime_observed_at"`
+	CurrentConfig     map[string]interface{} `json:"current_config"`
+}
+
+// observedRuntimeCache avoids hammering model-manager /api/runtime on every
+// 2s v2 snapshot refresh. The deployment panel is background-built, so a 10s
+// TTL is plenty and keeps the snapshot path off the model-manager request path
+// most of the time.
+var (
+	observedRuntimeMu     sync.Mutex
+	observedRuntimeCache  map[string]interface{}
+	observedRuntimeSource string
+	observedRuntimeAt     float64
+	observedRuntimeTime   time.Time
+	observedRuntimeTTL    = 10 * time.Second
+)
+
+func fetchObservedRuntime(cfg *shared.Config) (map[string]interface{}, string, float64, bool) {
+	observedRuntimeMu.Lock()
+	defer observedRuntimeMu.Unlock()
+	if observedRuntimeCache != nil && time.Since(observedRuntimeTime) < observedRuntimeTTL {
+		return observedRuntimeCache, observedRuntimeSource, observedRuntimeAt, true
+	}
+	if cfg == nil || strings.TrimSpace(cfg.Services.ModelManager.URL) == "" {
+		return nil, "", 0, false
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	endpoint := strings.TrimRight(cfg.Services.ModelManager.URL, "/") + "/api/runtime"
+	resp, err := client.Get(endpoint)
+	if err != nil {
+		return nil, "", 0, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", 0, false
+	}
+	var payload observedRuntimePayload
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&payload); err != nil {
+		return nil, "", 0, false
+	}
+	if !payload.ServerRunning || len(payload.CurrentConfig) == 0 {
+		return nil, payload.RuntimeSource, payload.RuntimeObservedAt, false
+	}
+	observedRuntimeCache = payload.CurrentConfig
+	observedRuntimeSource = payload.RuntimeSource
+	observedRuntimeAt = payload.RuntimeObservedAt
+	observedRuntimeTime = time.Now()
+	return observedRuntimeCache, observedRuntimeSource, observedRuntimeAt, true
+}
+
+func normalizeObservedRuntimeConfig(config map[string]interface{}) gin.H {
+	result := v2Map(config)
+	for _, key := range []string{"flash_attn", "chunked_batch"} {
+		if value, ok := result[key].(bool); ok {
+			result[key] = map[bool]string{true: "on", false: "off"}[value]
+		}
+	}
+	if result["concurrency"] == nil && result["np"] != nil {
+		result["concurrency"] = result["np"]
+	}
+	if result["k_cache_type"] == nil && result["cache_type_k"] != nil {
+		result["k_cache_type"] = result["cache_type_k"]
+	}
+	if result["v_cache_type"] == nil && result["cache_type_v"] != nil {
+		result["v_cache_type"] = result["cache_type_v"]
+	}
+	return result
+}
+
+func v2DeploymentSection(cfg *shared.Config) gin.H {
 	script := parseLlamaScript()
+	observed, runtimeSource, runtimeObservedAt, hasObserved := fetchObservedRuntime(cfg)
 	engines := scanEngines()
 	active := fmt.Sprint(script["active_engine"])
+	if hasObserved {
+		if value := strings.TrimSpace(fmt.Sprint(observed["llama_version"])); value != "" && value != "<nil>" {
+			active = value
+		}
+	}
 	if data, err := os.ReadFile("/data/inference-hub/state/active_engine"); err == nil {
-		if value := strings.TrimSpace(string(data)); value != "" {
+		if value := strings.TrimSpace(string(data)); value != "" && !hasObserved {
 			active = value
 		}
 	}
@@ -3788,17 +3981,45 @@ func v2DeploymentSection() gin.H {
 	}
 	modelPath := fmt.Sprint(script["model_path"])
 	modelName := fmt.Sprint(script["running_model"])
+	config := v2Map(script["params"])
+	if hasObserved {
+		config = normalizeObservedRuntimeConfig(observed)
+		if value := strings.TrimSpace(fmt.Sprint(config["model_path"])); value != "" && value != "<nil>" {
+			modelPath = value
+		}
+		if value := strings.TrimSpace(fmt.Sprint(config["model"])); value != "" && value != "<nil>" {
+			modelName = value
+		}
+	}
 	if modelName == "" || modelName == "unknown" {
 		modelName = filepath.Base(modelPath)
 	}
-	pid := findPid("llama-server")
-	config := v2Map(script["params"])
+	// When the model manager has an observed runtime, keep the PID from that
+	// same snapshot.  A separate /proc scan can select a different llama-server
+	// during a restart or if more than one instance exists on the host.
+	pid := 0
+	if hasObserved {
+		if value, ok := observed["pid"].(float64); ok && value > 0 {
+			pid = int(value)
+		}
+	}
+	if pid <= 0 {
+		pid = findPid("llama-server")
+	}
 	config["model_path"] = modelPath
 	config["pid"] = pid
-	config["llama_version"] = active
-	config["concurrency"] = config["np"]
-	config["k_cache_type"] = config["cache_type_k"]
-	config["v_cache_type"] = config["cache_type_v"]
+	if config["llama_version"] == nil || fmt.Sprint(config["llama_version"]) == "" {
+		config["llama_version"] = active
+	}
+	if config["concurrency"] == nil && config["np"] != nil {
+		config["concurrency"] = config["np"]
+	}
+	if config["k_cache_type"] == nil && config["cache_type_k"] != nil {
+		config["k_cache_type"] = config["cache_type_k"]
+	}
+	if config["v_cache_type"] == nil && config["cache_type_v"] != nil {
+		config["v_cache_type"] = config["cache_type_v"]
+	}
 	if pid > 0 {
 		if binary, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid)); err == nil {
 			config["binary_path"] = binary
@@ -3811,7 +4032,9 @@ func v2DeploymentSection() gin.H {
 		"active_engine":       active,
 		"config":              config,
 		"engines":             engines,
-		"source":              "process-argv+start-script+engine-registry",
+		"source":              map[bool]string{true: "model-manager:/api/runtime+engine-registry", false: "start-script+engine-registry"}[hasObserved],
+		"runtime_source":      runtimeSource,
+		"runtime_observed_at": runtimeObservedAt,
 		"conflicts":           []interface{}{},
 		"engine_branch":       activeInfo["branch"],
 		"engine_commit":       activeInfo["commit"],
@@ -3876,21 +4099,28 @@ func buildV2Sections(cfg *shared.Config, httpClient *shared.HTTPClient) gin.H {
 	}
 
 	llmSection := gin.H{
-		"available":           llm != nil,
-		"sample_complete":     llm != nil && llm.TPOT > 0,
-		"ttft_ms":             nil,
-		"prompt_ms_per_token": nil,
-		"tpot_ms":             nil,
-		"gen_tps":             nil,
-		"prompt_tokens":       nil,
-		"prompt_tokens_total": nil,
-		"eval_tokens":         nil,
-		"eval_tokens_total":   nil,
-		"prompt_ms":           nil,
-		"eval_ms":             nil,
-		"spec_accept_rate":    nil,
-		"source":              "go inference-hub collector",
-		"confidence":          "low",
+		"available":                  llm != nil,
+		"sample_complete":            llm != nil && llm.TPOT > 0,
+		"latency_sample_basis":       "metrics scrape samples; not request-level percentiles",
+		"ttft_ms":                    nil,
+		"prompt_ms_per_token":        nil,
+		"tpot_ms":                    nil,
+		"gen_tps":                    nil,
+		"prompt_tokens":              nil,
+		"last_request_prompt_tokens": nil,
+		"prompt_tokens_total":        nil,
+		"eval_tokens":                nil,
+		"last_request_eval_tokens":   nil,
+		"eval_tokens_total":          nil,
+		"prompt_ms":                  nil,
+		"last_request_prompt_ms":     nil,
+		"eval_ms":                    nil,
+		"last_request_eval_ms":       nil,
+		"last_request_tps":           nil,
+		"last_request_tpot_ms":       nil,
+		"spec_accept_rate":           nil,
+		"source":                     "go inference-hub collector",
+		"confidence":                 "low",
 	}
 	if llm != nil {
 		llmSection["prompt_ms_per_token"] = llm.PromptMsPerToken
@@ -3913,15 +4143,19 @@ func buildV2Sections(cfg *shared.Config, httpClient *shared.HTTPClient) gin.H {
 		if latest.PromptMs > 0 && latest.PromptTokens > 0 {
 			llmSection["prompt_ms"] = latest.PromptMs
 			llmSection["prompt_tokens"] = latest.PromptTokens
-			llmSection["prompt_tokens_total"] = latest.PromptTokens
+			llmSection["last_request_prompt_ms"] = latest.PromptMs
+			llmSection["last_request_prompt_tokens"] = latest.PromptTokens
 			llmSection["prompt_ms_per_token"] = latest.PromptMs / float64(latest.PromptTokens)
 		}
 		if latest.TPS > 0 && latest.EvalTokens > 0 {
 			llmSection["eval_ms"] = float64(latest.EvalTokens) / latest.TPS * 1000
 			llmSection["eval_tokens"] = latest.EvalTokens
-			llmSection["eval_tokens_total"] = latest.EvalTokens
-			llmSection["tpot_ms"] = float64(latest.EvalTokens) / latest.TPS * 1000 / float64(latest.EvalTokens)
+			llmSection["last_request_eval_ms"] = float64(latest.EvalTokens) / latest.TPS * 1000
+			llmSection["last_request_eval_tokens"] = latest.EvalTokens
+			llmSection["last_request_tpot_ms"] = 1000 / latest.TPS
 			llmSection["gen_tps"] = latest.TPS
+			llmSection["last_request_tps"] = latest.TPS
+			llmSection["tpot_ms"] = 1000 / latest.TPS
 			llmSection["sample_complete"] = true
 			llmSection["confidence"] = "high"
 		}
@@ -3976,7 +4210,7 @@ func buildV2Sections(cfg *shared.Config, httpClient *shared.HTTPClient) gin.H {
 			"kv_cache": kv,
 		},
 		"services":   v2ServicesSection(cfg),
-		"deployment": v2DeploymentSection(),
+		"deployment": v2DeploymentSection(cfg),
 		"requests":   requests,
 	}
 	return sections
@@ -4079,7 +4313,7 @@ func handleV2Snapshot(cfg *shared.Config, httpClient *shared.HTTPClient) gin.Han
 
 func v2Quality(freshness map[string]shared.SourceFreshness) gin.H {
 	result := gin.H{}
-	for _, key := range []string{"system", "gpus", "inference"} {
+	for _, key := range []string{"system", "gpus", "inference", "llm", "kv_cache"} {
 		source := freshness[key]
 		result[key] = gin.H{
 			"available":  source.CollectedAtUnixMs > 0 && source.Status != "unavailable",
@@ -4275,6 +4509,27 @@ func registerReadWriteProxy(r *gin.Engine, pattern string, auth gin.HandlerFunc,
 	}
 }
 
+func modelManagerProxyURL(targetURL, requestPath, rawQuery string) (string, error) {
+	target, err := url.Parse(strings.TrimSpace(targetURL))
+	if err != nil {
+		return "", err
+	}
+	if target.Scheme == "" || target.Host == "" {
+		return "", fmt.Errorf("invalid model-manager upstream URL")
+	}
+	basePath := strings.TrimRight(target.Path, "/")
+	requestPath = "/" + strings.TrimLeft(requestPath, "/")
+	if requestPath == "/" {
+		target.Path = basePath + "/"
+	} else {
+		target.Path = basePath + requestPath
+	}
+	target.RawPath = ""
+	target.RawQuery = rawQuery
+	target.Fragment = ""
+	return target.String(), nil
+}
+
 func proxyRoutes(r *gin.Engine, cfg *shared.Config, auth gin.HandlerFunc) {
 	services := map[string]string{
 		"cluster":      cfg.Services.ClusterConfig.URL,
@@ -4295,21 +4550,33 @@ func proxyRoutes(r *gin.Engine, cfg *shared.Config, auth gin.HandlerFunc) {
 	modelManagerProxy := func(c *gin.Context) {
 		targetURL := cfg.Services.ModelManager.URL
 		path := c.Param("path")
-		if path == "" {
-			path = "/"
-		}
-		url := targetURL + path
-		req, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, url, c.Request.Body)
+		upstreamURL, err := modelManagerProxyURL(targetURL, path, c.Request.URL.RawQuery)
 		if err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 			return
 		}
-		for k, v := range c.Request.Header {
-			if k != "Host" && k != "Content-Length" {
-				req.Header[k] = v
-			}
+		req, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, upstreamURL, c.Request.Body)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
 		}
-		req.Host = targetURL
+		clientAdminKey := c.GetHeader("X-Admin-Key")
+		for k, v := range c.Request.Header {
+			if k == "Host" || k == "Content-Length" || strings.EqualFold(k, "X-Admin-Key") || strings.EqualFold(k, "Authorization") {
+				continue
+			}
+			req.Header[k] = v
+		}
+		if internalKey := strings.TrimSpace(os.Getenv("MODEL_MANAGER_ADMIN_KEY")); internalKey != "" {
+			req.Header.Set("X-Admin-Key", internalKey)
+		} else if clientAdminKey != "" {
+			// Compatibility for nodes that have not configured the internal
+			// control-plane key yet; the gateway boundary still authenticates the
+			// browser request before it reaches this fallback.
+			req.Header.Set("X-Admin-Key", clientAdminKey)
+		}
+		target, _ := url.Parse(targetURL)
+		req.Host = target.Host
 		resp, err := modelManagerClient.Do(req)
 		if err != nil {
 			c.JSON(502, gin.H{"error": err.Error()})
@@ -4838,10 +5105,18 @@ func handleAlertStatus() gin.HandlerFunc {
 			return
 		}
 
-		// Return current alert rules configuration
+		state := map[string]map[string]interface{}{}
+		if globalAlertEngine != nil {
+			state = globalAlertEngine.GetState()
+		}
+
+		// Return both configuration and the evaluator's live state. Keeping the
+		// two together prevents a dashboard from showing configured rules while
+		// hiding whether they are currently firing or stale.
 		c.JSON(200, gin.H{
 			"rules":     cfg.Alerts.Rules,
 			"notifiers": cfg.Alerts.Notifiers,
+			"state":     state,
 		})
 	}
 }
@@ -4889,40 +5164,67 @@ func evaluateAlerts(engine *alert_manager.AlertEngine) {
 
 // collectCurrentMetrics gathers current values for alert evaluation
 func collectCurrentMetrics() map[string]float64 {
+	// Alert metrics come from the collector caches (single source of truth),
+	// not from re-querying nvidia-smi / df on every 5s evaluation cycle.
+	// GPU keys are canonical aggregates (max across cards); KV usage is the
+	// real llamacpp:kv_cache_usage_ratio parsed by the LLM monitor; disk free
+	// comes from the system collector. Previously GPU alerts ran nvidia-smi,
+	// which never works on this AMD host, and keys were per-card suffixed so
+	// every GPU/KV rule silently failed to trigger.
 	metrics := make(map[string]float64)
 
-	cmd := exec.Command("sh", "-c", "nvidia-smi --query-gpu=temperature.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null")
-	out, err := cmd.Output()
-	if err == nil {
-		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-		for i, line := range lines {
-			vals := strings.Split(line, ",")
-			if len(vals) >= 3 {
-				temp, _ := strconv.ParseFloat(strings.TrimSpace(vals[0]), 64)
-				memUsed, _ := strconv.ParseFloat(strings.TrimSpace(vals[1]), 64)
-				memTotal, _ := strconv.ParseFloat(strings.TrimSpace(vals[2]), 64)
-				if memTotal > 0 {
-					memPct := memUsed / memTotal * 100
-					metrics[fmt.Sprintf("gpu_mem_used_pct_%d", i)] = float64(int(memPct*10)) / 10
-				}
-				metrics[fmt.Sprintf("gpu_temp_celsius_%d", i)] = temp
+	cfg := shared.GetConfig()
+
+	// GPU: aggregate max temperature / memory utilization.
+	if gpus := cachedGPUData(cfg); gpus != nil {
+		var maxTemp, maxMemPct float64
+		for _, g := range gpus.GPUs {
+			if g.Temp > maxTemp {
+				maxTemp = g.Temp
+			}
+			if g.MemUtilPct > maxMemPct {
+				maxMemPct = g.MemUtilPct
+			}
+		}
+		metrics["gpu_temp_celsius"] = maxTemp
+		metrics["gpu_mem_used_pct"] = maxMemPct
+	}
+
+	// KV cache: llama-server /metrics kv_cache_usage_ratio via LLM monitor.
+	if globalLLMBase != nil {
+		if v, _, ok := globalLLMBase.LatestAny(); ok {
+			if llm, typed := v.(shared.LLMMetrics); typed {
+				metrics["kv_cache_used_pct"] = llm.KVCacheUsedPct
 			}
 		}
 	}
 
-	cmd = exec.Command("sh", "-c", "df / | tail -1 | awk '{print $5}'")
-	out, err = cmd.Output()
-	if err == nil {
-		pctStr := strings.TrimSpace(strings.TrimSuffix(string(out), "%"))
-		pct, _ := strconv.ParseFloat(pctStr, 64)
-		metrics["disk_free_pct"] = 100 - pct
+	// Disk: root mount free percentage.
+	if globalSystemBase != nil {
+		if v, _, ok := globalSystemBase.LatestAny(); ok {
+			if sys, typed := v.(shared.SystemMetrics); typed {
+				for _, d := range sys.Disks {
+					if d.Mountpoint == "/" {
+						metrics["disk_free_pct"] = 100 - d.UsedPct
+						break
+					}
+				}
+			}
+		}
 	}
 
-	cfg := shared.GetConfig()
+	// Service health probe against the configured llama upstream. The probe
+	// must carry the Bearer key: llama-server rejects unauthenticated /health
+	// (and, on 9093 sse-proxy, auth was not required — this matters when the
+	// gateway talks to llama directly on 8080).
 	if cfg != nil {
 		healthURL := cfg.Services.LlamaServer.URL + cfg.Services.LlamaServer.HealthPath
 		client := &http.Client{Timeout: 3 * time.Second}
-		resp, err := client.Get(healthURL)
+		req, _ := http.NewRequest(http.MethodGet, healthURL, nil)
+		if k := cfg.GetAPIKey(); k != "" {
+			req.Header.Set("Authorization", "Bearer "+k)
+		}
+		resp, err := client.Do(req)
 		if err != nil || resp.StatusCode >= 400 {
 			metrics["service_health_status"] = 0
 		} else {

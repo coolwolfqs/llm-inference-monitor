@@ -3,6 +3,8 @@ package collectors
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strconv"
@@ -39,7 +41,8 @@ func (c *InferenceCollector) Collect(ctx context.Context) (interface{}, error) {
 	// Slots
 	slotsURL := baseURL + c.cfg.Services.LlamaServer.SlotsPath
 	var slotsData []map[string]interface{}
-	if err := c.http.GetJSONContext(ctx, slotsURL, &slotsData); err == nil {
+	slotsErr := c.http.GetJSONContext(ctx, slotsURL, &slotsData)
+	if slotsErr == nil {
 		result.TotalSlots = len(slotsData)
 		for _, s := range slotsData {
 			slot := shared.SlotInfo{}
@@ -69,7 +72,8 @@ func (c *InferenceCollector) Collect(ctx context.Context) (interface{}, error) {
 	// Stats
 	statsURL := baseURL + c.cfg.Services.LlamaServer.StatsPath
 	var statsData map[string]interface{}
-	if err := c.http.GetJSONContext(ctx, statsURL, &statsData); err == nil {
+	statsErr := c.http.GetJSONContext(ctx, statsURL, &statsData)
+	if statsErr == nil {
 		if v, ok := statsData["tokens_predicted_per_second"].(float64); ok {
 			result.LastTPS = v
 		}
@@ -92,7 +96,12 @@ func (c *InferenceCollector) Collect(ctx context.Context) (interface{}, error) {
 			result.KVCacheUsedCells = int(v)
 		}
 	} else {
-		c.parsePrometheusMetrics(ctx, baseURL, &result)
+		if !c.parsePrometheusMetrics(ctx, baseURL, &result) {
+			return result, fmt.Errorf("stats unavailable: %v; prometheus fallback unavailable", statsErr)
+		}
+	}
+	if slotsErr != nil {
+		return result, fmt.Errorf("slots unavailable: %v", slotsErr)
 	}
 
 	// Write metrics
@@ -101,17 +110,19 @@ func (c *InferenceCollector) Collect(ctx context.Context) (interface{}, error) {
 	return result, nil
 }
 
-func (c *InferenceCollector) parsePrometheusMetrics(ctx context.Context, baseURL string, result *shared.InferenceMetrics) {
+func (c *InferenceCollector) parsePrometheusMetrics(ctx context.Context, baseURL string, result *shared.InferenceMetrics) bool {
 	metricsURL := baseURL + c.cfg.Services.LlamaServer.MetricsPath
 	resp, err := c.http.GetContext(ctx, metricsURL)
 	if err != nil {
-		return
+		return false
 	}
 	defer resp.Body.Close()
 
-	buf := make([]byte, 65536)
-	n, _ := resp.Body.Read(buf)
-	text := string(buf[:n])
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return false
+	}
+	text := string(body)
 
 	metrics := make(map[string]float64)
 	for _, line := range strings.Split(text, "\n") {
@@ -132,13 +143,18 @@ func (c *InferenceCollector) parsePrometheusMetrics(ctx context.Context, baseURL
 		result.LastLatencyMs = 1000.0 / result.LastTPS
 	}
 	result.KVCacheUsedPct = metrics["llamacpp:kv_cache_usage_ratio"] * 100
+	return len(metrics) > 0
 }
 
 func (c *InferenceCollector) writeMetrics(m *shared.InferenceMetrics, ts time.Time) {
 	c.write("inference_tps", m.LastTPS, nil, ts)
 	c.write("inference_latency_ms", m.LastLatencyMs, nil, ts)
-	c.write("inference_prompt_tokens_total", float64(m.LastPromptTokens), nil, ts)
-	c.write("inference_eval_tokens_total", float64(m.LastEvalTokens), nil, ts)
+	// These values are observed by the upstream stats endpoint and are not
+	// guaranteed to be process-lifetime counters. Publish only unambiguous
+	// names; historical *_total series remain in the TSDB but are no longer
+	// refreshed by this collector.
+	c.write("inference_prompt_tokens_observed", float64(m.LastPromptTokens), nil, ts)
+	c.write("inference_eval_tokens_observed", float64(m.LastEvalTokens), nil, ts)
 	c.write("inference_active_slots", float64(m.ActiveSlots), nil, ts)
 	c.write("inference_total_slots", float64(m.TotalSlots), nil, ts)
 	c.write("inference_kv_cache_used_pct", m.KVCacheUsedPct, nil, ts)

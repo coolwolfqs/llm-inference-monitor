@@ -33,8 +33,13 @@ export interface ModelArtifact {
 }
 
 export interface RuntimeConfig {
+  pid?: number | null
+  model?: string
+  model_path?: string
+  binary_path?: string
+  alias?: string
   llama_version?: string
-  profile_id?: string
+  profile_id?: string | null
   ctx_size?: number
   ngl?: number
   concurrency?: number
@@ -44,8 +49,14 @@ export interface RuntimeConfig {
   batch?: number
   ubatch?: number
   threads?: number
+  threads_http?: number
   temp?: number
-  flash_attn?: boolean
+  flash_attn?: boolean | string
+  chunked_batch?: boolean | string
+  reasoning?: string
+  ui?: boolean
+  host?: string
+  port?: number
   spec_type?: string
   cache_ram?: number
   sleep_idle_seconds?: number
@@ -82,6 +93,11 @@ export interface ModelsResponse {
   current_model: string
   current_model_id: string
   current_config: RuntimeConfig
+  desired_config?: {
+    profile_id?: string
+    parameters?: Record<string, unknown>
+    [key: string]: unknown
+  }
   server_running: boolean
   mmproj_enabled: boolean
   total_size: string

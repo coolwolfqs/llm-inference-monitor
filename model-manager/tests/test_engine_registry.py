@@ -16,6 +16,15 @@ class EngineRegistryTests(unittest.TestCase):
         app._ENGINES_CACHE["engines"] = []
         app._ENGINES_CACHE["ts"] = 0
 
+    def test_flash_attention_normalizes_ui_booleans_for_llama(self):
+        self.assertEqual(app._normalize_flash_attn(True), "on")
+        self.assertEqual(app._normalize_flash_attn(False), "off")
+        self.assertEqual(app._normalize_flash_attn("True"), "on")
+        self.assertEqual(app._normalize_flash_attn("off"), "off")
+        self.assertEqual(app._normalize_flash_attn("auto"), "auto")
+        with self.assertRaises(app.HTTPException):
+            app._normalize_flash_attn("True-ish")
+
     def test_backend_only_version_file_is_normalized(self):
         with tempfile.TemporaryDirectory() as tmp:
             engines_dir = Path(tmp)

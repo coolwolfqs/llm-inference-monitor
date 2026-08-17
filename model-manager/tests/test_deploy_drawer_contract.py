@@ -13,6 +13,13 @@ class DeployDrawerContractTests(unittest.TestCase):
         / "components"
         / "DeployDrawer.vue"
     ).read_text(encoding="utf-8")
+    styles = (
+        Path(__file__).resolve().parents[1]
+        / "frontend"
+        / "src"
+        / "styles"
+        / "main.css"
+    ).read_text(encoding="utf-8")
 
     def test_visible_fields_bind_to_their_own_canonical_keys(self):
         for key in (
@@ -31,6 +38,17 @@ class DeployDrawerContractTests(unittest.TestCase):
         self.assertIn("524288", self.source)
         self.assertIn("model-manager:deploy-config:v5", self.source)
         self.assertNotIn("1. 引擎选择", self.source)
+
+    def test_form_grid_controls_do_not_stretch_into_neighboring_rows(self):
+        self.assertIn("align-content: start", self.styles)
+        self.assertIn("height: 38px", self.styles)
+        self.assertIn(".form-grid label > select", self.styles)
+
+    def test_advanced_sections_use_compact_titles(self):
+        self.assertIn("<summary>高级参数 <ChevronDown", self.source)
+        self.assertIn("<summary>拓展配置 <ChevronDown", self.source)
+        self.assertNotIn("高级参数（共性）", self.source)
+        self.assertNotIn("拓展配置（引擎/模型）", self.source)
 
 
 if __name__ == "__main__":

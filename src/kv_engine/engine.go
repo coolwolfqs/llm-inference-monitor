@@ -2,6 +2,7 @@ package kv_engine
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -120,10 +121,12 @@ type KVEngine struct {
 	lastCapture     time.Time
 	captureInterval time.Duration
 	autoCapture     bool
+	captureCh       chan int
+	baselinePath    string
 }
 
 func NewKVEngine(httpClient *shared.HTTPClient, llamaURL string) *KVEngine {
-	return &KVEngine{
+	e := &KVEngine{
 		baseline:        make(map[int]float64),
 		meta:            make(map[string]interface{}),
 		httpClient:      httpClient,
@@ -132,6 +135,54 @@ func NewKVEngine(httpClient *shared.HTTPClient, llamaURL string) *KVEngine {
 		ggufCacheMtime:  make(map[string]float64),
 		autoCapture:     true,
 		captureInterval: 30 * time.Minute,
+		captureCh:       make(chan int, 1),
+		baselinePath:    "/data/inference-hub-v3/kv_baseline.json",
+	}
+	if p := strings.TrimSpace(os.Getenv("KV_BASELINE_PATH")); p != "" {
+		e.baselinePath = p
+	}
+	e.loadBaseline()
+	go e.captureLoop()
+	return e
+}
+
+// captureLoop consumes baseline capture requests in the background and
+// re-captures on the configured interval.
+func (e *KVEngine) captureLoop() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case n := <-e.captureCh:
+			e.ForceCapture(n)
+		case <-ticker.C:
+			e.mu.RLock()
+			due := e.autoCapture && (e.baselineTS.IsZero() || time.Since(e.baselineTS) >= e.captureInterval)
+			n := e.numGPUs
+			e.mu.RUnlock()
+			if due {
+				if n <= 0 {
+					n = 1
+				}
+				e.ForceCapture(n)
+			}
+		}
+	}
+}
+
+// EnsureBaselineAsync requests one background baseline capture when no valid
+// baseline exists yet. A second request while one is running is dropped (the
+// channel has capacity 1).
+func (e *KVEngine) EnsureBaselineAsync(numGPUs int) {
+	e.mu.RLock()
+	captured := !e.baselineTS.IsZero()
+	e.mu.RUnlock()
+	if captured {
+		return
+	}
+	select {
+	case e.captureCh <- numGPUs:
+	default:
 	}
 }
 
@@ -614,6 +665,9 @@ func (e *KVEngine) CaptureBaseline(numGPUs int) bool {
 					e.baselineTS = time.Now()
 					e.mu.Unlock()
 					shared.Infof("[KV Baseline] Captured: %+v", currentFree)
+					if err := e.SaveBaseline(); err != nil {
+						shared.Errorf("[KV Baseline] persist failed: %v", err)
+					}
 					return true
 				}
 			} else {
@@ -637,12 +691,59 @@ func (e *KVEngine) CaptureBaseline(numGPUs int) bool {
 		e.baselineTS = time.Now()
 		e.mu.Unlock()
 		shared.Infof("[KV Baseline] Timeout but captured")
-		return true
+	if err := e.SaveBaseline(); err != nil {
+		shared.Errorf("[KV Baseline] persist failed: %v", err)
+	}
+	return true
 	}
 	return false
 }
 
 // ForceCapture forces a baseline recapture
+
+// loadBaseline restores a previously persisted baseline so a gateway restart
+// does not throw away a valid capture.
+func (e *KVEngine) loadBaseline() {
+	if e.baselinePath == "" {
+		return
+	}
+	data, err := os.ReadFile(e.baselinePath)
+	if err != nil {
+		return
+	}
+	var payload struct {
+		Baseline   map[int]float64 `json:"baseline"`
+		CapturedAt time.Time       `json:"captured_at"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil || len(payload.Baseline) == 0 {
+		return
+	}
+	e.mu.Lock()
+	e.baseline = payload.Baseline
+	e.baselineTS = payload.CapturedAt
+	e.mu.Unlock()
+	shared.Infof("[KV Baseline] loaded persisted baseline from %s (%d GPU(s))",
+		e.baselinePath, len(e.baseline))
+}
+
+// SaveBaseline persists the current baseline so it survives gateway restarts.
+func (e *KVEngine) SaveBaseline() error {
+	if e.baselinePath == "" {
+		return nil
+	}
+	e.mu.RLock()
+	payload := struct {
+		Baseline   map[int]float64 `json:"baseline"`
+		CapturedAt time.Time       `json:"captured_at"`
+	}{e.baseline, e.baselineTS}
+	e.mu.RUnlock()
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(e.baselinePath, data, 0644)
+}
+
 func (e *KVEngine) ForceCapture(numGPUs int) bool {
 	e.mu.Lock()
 	e.lastCapture = time.Time{}

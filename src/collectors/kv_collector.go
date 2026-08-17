@@ -41,8 +41,10 @@ func (c *KVCollector) Collect(ctx context.Context) (interface{}, error) {
 	// Check if llama-server identity changed (model/config/pid) — auto-reset baseline
 	c.engine.CheckIdentityAndReset(numGPUs)
 
-	// Auto-capture baseline if not yet captured
-	c.engine.CaptureBaseline(numGPUs)
+	// Auto-capture baseline in the background if not yet captured
+	// (CaptureBaseline samples GPU memory over tens of seconds and must not
+	// block the collector cycle).
+	c.engine.EnsureBaselineAsync(numGPUs)
 
 	result := c.engine.Compute(gpus, numGPUs)
 	return toKVMetrics(result), nil

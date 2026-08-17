@@ -138,6 +138,22 @@ class DeploymentTaskStore:
             int(row["sequence"]), str(row["state"]), str(row["phase"]), int(row["progress"])
         ) if row else (0, "", "", 0)
 
+    def prune(self, keep: int = 500, max_age_seconds: int = 30 * 86400) -> int:
+        """Bound completed deployment history while preserving active work."""
+        cutoff = time.time() - max(0, int(max_age_seconds))
+        keep = max(1, int(keep))
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """DELETE FROM deployment_tasks
+                   WHERE state NOT IN ('queued','running') AND finished_at IS NOT NULL
+                     AND finished_at < ?
+                     AND sequence NOT IN (
+                       SELECT sequence FROM deployment_tasks ORDER BY sequence DESC LIMIT ?
+                     )""",
+                (cutoff, keep),
+            )
+            return int(cursor.rowcount or 0)
+
     @staticmethod
     def _public(row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)

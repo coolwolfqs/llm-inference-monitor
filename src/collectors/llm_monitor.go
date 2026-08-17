@@ -2,6 +2,7 @@ package collectors
 
 import (
 	"context"
+	"io"
 	"math"
 	"sort"
 	"strconv"
@@ -47,9 +48,12 @@ func (c *LLMMonitor) Collect(ctx context.Context) (interface{}, error) {
 	}
 	defer resp.Body.Close()
 
-	buf := make([]byte, 131072)
-	n, _ := resp.Body.Read(buf)
-	text := string(buf[:n])
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		c.write("llm_collect_error", 1.0, nil, time.Now())
+		return result, err
+	}
+	text := string(body)
 
 	metrics := make(map[string]float64)
 	for _, line := range strings.Split(text, "\n") {
@@ -152,9 +156,9 @@ func (c *LLMMonitor) avg(data []float64) float64 {
 func (c *LLMMonitor) writeMetrics(m *shared.LLMMetrics, ts time.Time) {
 	c.write("llm_prompt_ms_per_token", m.PromptMsPerToken, nil, ts)
 	c.write("llm_tpot_ms", m.TPOT, nil, ts)
-	c.write("llm_ttft_p50", m.TTFTP50, nil, ts)
-	c.write("llm_ttft_p95", m.TTFTP95, nil, ts)
-	c.write("llm_ttft_p99", m.TTFTP99, nil, ts)
+	// llama.cpp metrics do not expose request-level TTFT. Do not publish
+	// zero-valued TTFT percentiles as if they were measured data.
+	c.write("llm_ttft_available", 0, nil, ts)
 	c.write("llm_tpot_p50", m.TPOTP50, nil, ts)
 	c.write("llm_tpot_p95", m.TPOTP95, nil, ts)
 	c.write("llm_spec_accept_rate", m.SpecAcceptRate, nil, ts)

@@ -21,6 +21,7 @@ import (
 type v2EventBroadcaster struct {
 	mu      sync.Mutex
 	clients map[uint64]chan []byte
+	history []v2EventFrame
 	nextID  uint64
 	running bool
 	stopCh  chan struct{}
@@ -28,6 +29,13 @@ type v2EventBroadcaster struct {
 	cfg     *shared.Config
 	hc      *shared.HTTPClient
 }
+
+type v2EventFrame struct {
+	id   uint64
+	data []byte
+}
+
+const v2EventHistoryLimit = 30
 
 var globalV2EventBroadcaster = &v2EventBroadcaster{clients: make(map[uint64]chan []byte)}
 
@@ -85,13 +93,18 @@ func (b *v2EventBroadcaster) publish() {
 	if cfg == nil {
 		return
 	}
-	frame, err := buildV2EventFrame(cfg, hc, atomic.AddUint64(&v2EventCursor, 1))
+	id := atomic.AddUint64(&v2EventCursor, 1)
+	frame, err := buildV2EventFrame(cfg, hc, id)
 	if err != nil {
 		shared.Errorf("[v2 events] encode failed: %v", err)
 		return
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.history = append(b.history, v2EventFrame{id: id, data: frame})
+	if len(b.history) > v2EventHistoryLimit {
+		b.history = b.history[len(b.history)-v2EventHistoryLimit:]
+	}
 	for _, ch := range b.clients {
 		select {
 		case ch <- frame:
@@ -110,13 +123,21 @@ func (b *v2EventBroadcaster) publish() {
 	}
 }
 
-func (b *v2EventBroadcaster) subscribe() (uint64, <-chan []byte, func()) {
+func (b *v2EventBroadcaster) subscribe(after uint64) (uint64, <-chan []byte, func(), [][]byte) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.nextID++
 	id := b.nextID
 	ch := make(chan []byte, 2)
 	b.clients[id] = ch
+	var replay [][]byte
+	if after > 0 {
+		for _, item := range b.history {
+			if item.id > after {
+				replay = append(replay, item.data)
+			}
+		}
+	}
 	return id, ch, func() {
 		b.mu.Lock()
 		if existing, ok := b.clients[id]; ok {
@@ -124,7 +145,7 @@ func (b *v2EventBroadcaster) subscribe() (uint64, <-chan []byte, func()) {
 			close(existing)
 		}
 		b.mu.Unlock()
-	}
+	}, replay
 }
 
 func buildV2EventFrame(cfg *shared.Config, hc *shared.HTTPClient, id uint64) ([]byte, error) {
@@ -151,21 +172,39 @@ func handleV2Events(cfg *shared.Config, httpClient *shared.HTTPClient) gin.Handl
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
 		c.Header("X-Accel-Buffering", "no")
+		c.Header("X-Event-Mode", "latest-state-with-replay")
 		c.Header("X-Event-Cursor", strconv.FormatUint(atomic.LoadUint64(&v2EventCursor), 10))
 
 		startV2EventBroadcaster(cfg, httpClient)
-		_, frames, unsubscribe := globalV2EventBroadcaster.subscribe()
+		after := uint64(0)
+		if raw := c.Query("after"); raw != "" {
+			after, _ = strconv.ParseUint(raw, 10, 64)
+		}
+		if after == 0 {
+			if raw := c.GetHeader("Last-Event-ID"); raw != "" {
+				after, _ = strconv.ParseUint(raw, 10, 64)
+			}
+		}
+		_, frames, unsubscribe, replay := globalV2EventBroadcaster.subscribe(after)
 		defer unsubscribe()
 
-		initial, err := buildV2EventFrame(cfg, httpClient, atomic.LoadUint64(&v2EventCursor))
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "event encoding failed"})
-			return
+		// The event payload is a complete current-state snapshot. Replay the
+		// bounded in-memory window when possible; otherwise send one current
+		// frame so a reconnect never depends on a missing history segment.
+		if len(replay) == 0 {
+			initial, err := buildV2EventFrame(cfg, httpClient, atomic.LoadUint64(&v2EventCursor))
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "event encoding failed"})
+				return
+			}
+			replay = append(replay, initial)
 		}
-		if _, err := c.Writer.Write(initial); err != nil {
-			return
+		for _, frame := range replay {
+			if _, err := c.Writer.Write(frame); err != nil {
+				return
+			}
+			c.Writer.Flush()
 		}
-		c.Writer.Flush()
 
 		ctx := c.Request.Context()
 		for {

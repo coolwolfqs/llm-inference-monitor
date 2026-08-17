@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,6 +39,12 @@ type MetricsStore struct {
 	closeOnce sync.Once
 	wg        sync.WaitGroup
 	dropped   atomic.Uint64
+
+	// backoff state for VictoriaMetrics failures (see flushLoop).
+	flushMu2      sync.Mutex
+	failStreak    int
+	backoffUntil  time.Time
+	consecutiveOK int
 }
 
 // vmLine represents a single metric line in VictoriaMetrics JSON Lines format
@@ -51,7 +58,10 @@ func NewMetricsStore(vmURL string, timeoutSec int) *MetricsStore {
 	if timeoutSec <= 0 {
 		timeoutSec = 5
 	}
-	hostname, _ := os.Hostname()
+	nodeID := strings.TrimSpace(os.Getenv("CONTROL_NODE_ID"))
+	if nodeID == "" {
+		nodeID, _ = os.Hostname()
+	}
 	ms := &MetricsStore{
 		vmURL: vmURL,
 		client: &http.Client{
@@ -62,7 +72,7 @@ func NewMetricsStore(vmURL string, timeoutSec int) *MetricsStore {
 				IdleConnTimeout:     90 * time.Second,
 			},
 		},
-		commonLabels: map[string]string{"node_id": hostname},
+		commonLabels: map[string]string{"node_id": nodeID},
 		flushCh:      make(chan struct{}, 1),
 		stopCh:       make(chan struct{}),
 	}
@@ -78,20 +88,62 @@ func (ms *MetricsStore) flushLoop() {
 	for {
 		select {
 		case <-ms.flushCh:
-			if err := ms.Flush(); err != nil {
-				Errorf("[MetricsStore] async flush failed: %v", err)
-			}
+			ms.flushWithBackoff()
 		case <-ticker.C:
-			if err := ms.Flush(); err != nil {
-				Errorf("[MetricsStore] periodic flush failed: %v", err)
-			}
+			ms.flushWithBackoff()
 		case <-ms.stopCh:
+			// stopCh is already closed by Close(); drain once and exit.
 			if err := ms.Flush(); err != nil {
 				Errorf("[MetricsStore] final flush failed: %v", err)
 			}
 			return
 		}
 	}
+}
+
+// flushWithBackoff tracks consecutive VictoriaMetrics failures and drops the
+// flush cadence to 1s/2s/5s/10s (capped) while the backend is down, so a long
+// outage no longer produces an error-log storm or a 1s hot retry loop.
+func (ms *MetricsStore) flushWithBackoff() {
+	ms.flushMu2.Lock()
+	now := time.Now()
+	if now.Before(ms.backoffUntil) {
+		ms.flushMu2.Unlock()
+		return
+	}
+	ms.flushMu2.Unlock()
+
+	if err := ms.Flush(); err != nil {
+		ms.flushMu2.Lock()
+		ms.failStreak++
+		ms.consecutiveOK = 0
+		delay := time.Second
+		if ms.failStreak > 3 {
+			delay = 2 * time.Second
+		}
+		if ms.failStreak > 6 {
+			delay = 5 * time.Second
+		}
+		if ms.failStreak > 10 {
+			delay = 10 * time.Second
+		}
+		ms.backoffUntil = time.Now().Add(delay)
+		streak := ms.failStreak
+		ms.flushMu2.Unlock()
+		// Log every failure when fresh, then only the first failure of each
+		// streak segment to avoid a log storm during a long outage.
+		if streak <= 3 || streak%5 == 1 {
+			Errorf("[MetricsStore] VM write failed (streak=%d): %v", streak, err)
+		}
+		return
+	}
+	ms.flushMu2.Lock()
+	if ms.failStreak > 0 && ms.consecutiveOK == 0 {
+		Infof("[MetricsStore] VM write recovered after %d failures", ms.failStreak)
+	}
+	ms.failStreak = 0
+	ms.consecutiveOK++
+	ms.flushMu2.Unlock()
 }
 
 func (ms *MetricsStore) signalFlush() {

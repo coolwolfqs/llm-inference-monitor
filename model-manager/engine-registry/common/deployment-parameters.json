@@ -60,7 +60,7 @@
     {"key":"numa","label":"NUMA 策略","type":"select","flag":"--numa","values":["","distribute","isolate","numactl"],"default":"","group":"加载","managed":true},
     {"key":"mmproj","label":"视觉投影组件","type":"artifact","flag":"--mmproj","default":false,"group":"多模态","managed":true},
     {"key":"mmproj_offload","label":"视觉组件 GPU offload","type":"boolean","flag":"--mmproj-offload","false_flag":"--no-mmproj-offload","default":true,"group":"多模态"},
-    {"key":"reasoning","label":"Reasoning","type":"select","flag":"--reasoning","values":["on","off","auto"],"default":"auto","group":"生成","managed":true},
+    {"key":"reasoning","label":"Reasoning","type":"select","flag":"--reasoning","values":["on","off","auto"],"default":"off","group":"生成","managed":true},
     {"key":"reasoning_format","label":"Reasoning 格式","type":"select","flag":"--reasoning-format","values":["auto","none","deepseek","deepseek-legacy"],"default":"auto","group":"生成"},
     {"key":"reasoning_budget","label":"Reasoning 预算","type":"integer","flag":"--reasoning-budget","min":-1,"max":1048576,"default":-1,"group":"生成"},
     {"key":"reasoning_preserve","label":"保留 Reasoning 轨迹","type":"boolean","flag":"--reasoning-preserve","false_flag":"--no-reasoning-preserve","default":false,"group":"生成"},

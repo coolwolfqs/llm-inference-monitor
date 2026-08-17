@@ -1,7 +1,7 @@
 # InferenceHub v3 - Services Configuration
 services:
   llama_server:
-    url: "http://127.0.0.1:9093"
+    url: "http://127.0.0.1:8080"
     api_key_env: "LLAMA_API_KEY"
     timeout_sec: 10
     health_path: "/health"
@@ -13,7 +13,7 @@ services:
     timeout_sec: 30
     health_path: "/api/health"
   new_api:
-    url: "http://127.0.0.1:3010"
+    url: "http://10.1.1.22:3000"
     timeout_sec: 15
     health_path: "/api/status"
     docker_name: "new-api"
