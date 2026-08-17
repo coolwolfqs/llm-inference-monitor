@@ -307,11 +307,20 @@ func (c *GPUCollector) collectAMD() []shared.GPUMetrics {
 	cmd := exec.Command("sh", "-c", "rocm-smi --showallinfo 2>/dev/null")
 	out, err := cmd.Output()
 	if err == nil && len(out) > 0 {
-		gpu := c.parseRocmSMI(string(out))
+		// Newer ROCm versions keep VRAM byte counters in a separate command.
+		// Include that output so the dashboard does not degrade to a misleading
+		// 0/0 memory reading when --showallinfo omits the counters.
+		memOut, _ := exec.Command("sh", "-c", "rocm-smi --showmeminfo vram 2>/dev/null").Output()
+		combined := string(out)
+		if len(memOut) > 0 {
+			combined += "\n" + string(memOut)
+		}
+		gpu := c.parseRocmSMI(combined)
 		if gpu != nil {
 			gpu.Index = 0
 			gpu.Name = c.getAMDGPUName()
 			gpu.Driver = c.getAMDDriverVersion()
+			c.enrichAMDGPUFromSysfs(gpu, gpu.Index)
 			gpus = append(gpus, *gpu)
 			return gpus
 		}
@@ -325,21 +334,42 @@ func (c *GPUCollector) parseRocmSMI(output string) *shared.GPUMetrics {
 	gpu := &shared.GPUMetrics{}
 
 	// GPU utilization
-	if m := regexp.MustCompile(`GPU use \(%\)\s*:\s*(\d+)`).FindStringSubmatch(output); len(m) > 1 {
+	if m := regexp.MustCompile(`GPU use \(%\)\s*:\s*([\d.]+)`).FindStringSubmatch(output); len(m) > 1 {
 		gpu.Util = parseFloat64(m[1])
 	}
 
-	// Memory
-	if mu := regexp.MustCompile(`Memory used \(bytes\)\s*:\s*(\d+)`).FindStringSubmatch(output); len(mu) > 1 {
-		if mt := regexp.MustCompile(`Memory total \(bytes\)\s*:\s*(\d+)`).FindStringSubmatch(output); len(mt) > 1 {
-			usedBytes, _ := strconv.ParseUint(mu[1], 10, 64)
-			totalBytes, _ := strconv.ParseUint(mt[1], 10, 64)
-			gpu.MemUsed = float64(usedBytes / (1024 * 1024))
-			gpu.MemTotal = float64(totalBytes / (1024 * 1024))
-			gpu.MemFree = gpu.MemTotal - gpu.MemUsed
-			gpu.MemUtilPct = safeDiv(gpu.MemUsed, gpu.MemTotal) * 100
-			gpu.MemUtil = gpu.MemUtilPct
+	// Memory. ROCm 7 reports VRAM counters as "VRAM ... (B)" while older
+	// versions use "Memory ... (bytes)". Accept both forms.
+	findUint := func(patterns ...string) uint64 {
+		for _, pattern := range patterns {
+			if m := regexp.MustCompile(pattern).FindStringSubmatch(output); len(m) > 1 {
+				value, err := strconv.ParseUint(m[1], 10, 64)
+				if err == nil {
+					return value
+				}
+			}
 		}
+		return 0
+	}
+	usedBytes := findUint(
+		`VRAM Total Used Memory \(B\)\s*:\s*(\d+)`,
+		`Memory used \(bytes\)\s*:\s*(\d+)`,
+	)
+	totalBytes := findUint(
+		`VRAM Total Memory \(B\)\s*:\s*(\d+)`,
+		`Memory total \(bytes\)\s*:\s*(\d+)`,
+	)
+	if totalBytes > 0 {
+		gpu.MemUsed = float64(usedBytes) / (1024 * 1024)
+		gpu.MemTotal = float64(totalBytes) / (1024 * 1024)
+		gpu.MemFree = gpu.MemTotal - gpu.MemUsed
+		gpu.MemUtilPct = safeDiv(gpu.MemUsed, gpu.MemTotal) * 100
+		gpu.MemUtil = gpu.MemUtilPct
+	} else if m := regexp.MustCompile(`GPU Memory Allocated \(VRAM%\)\s*:\s*([\d.]+)`).FindStringSubmatch(output); len(m) > 1 {
+		// Keep a percentage if byte counters are unavailable. The sysfs
+		// enrichment below can still fill the capacity and exact byte values.
+		gpu.MemUtilPct = parseFloat64(m[1])
+		gpu.MemUtil = gpu.MemUtilPct
 	}
 
 	// Temperature (edge sensor)
@@ -348,7 +378,7 @@ func (c *GPUCollector) parseRocmSMI(output string) *shared.GPUMetrics {
 	}
 
 	// Power
-	if m := regexp.MustCompile(`Average Graphics Package Power \(W\)\s*:\s*([\d.]+)`).FindStringSubmatch(output); len(m) > 1 {
+	if m := regexp.MustCompile(`(?:Current Socket|Average) Graphics Package Power \(W\)\s*:\s*([\d.]+)`).FindStringSubmatch(output); len(m) > 1 {
 		gpu.PowerDraw = parseFloat64(m[1])
 	}
 	if m := regexp.MustCompile(`Power limit \(W\)\s*:\s*([\d.]+)`).FindStringSubmatch(output); len(m) > 1 {
@@ -357,11 +387,100 @@ func (c *GPUCollector) parseRocmSMI(output string) *shared.GPUMetrics {
 	gpu.PowerPct = safeDiv(gpu.PowerDraw, gpu.PowerLimit) * 100
 
 	// Clock
-	if m := regexp.MustCompile(`GPU Clock \(Mhz\)\s*:\s*(\d+)`).FindStringSubmatch(output); len(m) > 1 {
+	if m := regexp.MustCompile(`(?i)GPU Clock \(Mhz\)\s*:\s*([\d.]+)`).FindStringSubmatch(output); len(m) > 1 {
 		gpu.Clock = parseFloat64(m[1])
+	} else if m := regexp.MustCompile(`(?i)sclk clock level\s*:\s*\d+\s*:\s*\(([\d.]+)\s*mhz\)`).FindStringSubmatch(output); len(m) > 1 {
+		gpu.Clock = parseFloat64(m[1])
+	}
+	if m := regexp.MustCompile(`(?i)Valid sclk range\s*:\s*[\d.]+\s*mhz\s*-\s*([\d.]+)\s*mhz`).FindStringSubmatch(output); len(m) > 1 {
+		gpu.ClockMax = parseFloat64(m[1])
+	}
+
+	if m := regexp.MustCompile(`(?i)PCI Bus\s*:\s*([0-9a-f:.]+)`).FindStringSubmatch(output); len(m) > 1 {
+		gpu.PCIBusID = strings.TrimSpace(m[1])
 	}
 
 	return gpu
+}
+
+// enrichAMDGPUFromSysfs fills fields that are absent from a particular
+// rocm-smi build. Sysfs is the local kernel source of truth for VRAM and is
+// intentionally only used when the vendor command did not provide a value.
+func (c *GPUCollector) enrichAMDGPUFromSysfs(gpu *shared.GPUMetrics, index int) {
+	deviceDir := filepath.Join("/sys/class/drm", fmt.Sprintf("card%d", index), "device")
+	readUint := func(name string) uint64 {
+		data, err := os.ReadFile(filepath.Join(deviceDir, name))
+		if err != nil {
+			return 0
+		}
+		value, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
+		if err != nil {
+			return 0
+		}
+		return value
+	}
+	if gpu.MemTotal <= 0 {
+		gpu.MemTotal = float64(readUint("mem_info_vram_total")) / (1024 * 1024)
+		gpu.MemUsed = float64(readUint("mem_info_vram_used")) / (1024 * 1024)
+	}
+	if gpu.MemTotal > 0 {
+		gpu.MemFree = gpu.MemTotal - gpu.MemUsed
+		gpu.MemUtilPct = safeDiv(gpu.MemUsed, gpu.MemTotal) * 100
+		gpu.MemUtil = gpu.MemUtilPct
+	}
+	if gpu.Temp <= 0 {
+		if tempFiles, err := filepath.Glob(filepath.Join(deviceDir, "hwmon", "hwmon*", "temp1_input")); err == nil {
+			for _, path := range tempFiles {
+				if value := readUintFromFile(path); value > 0 {
+					gpu.Temp = float64(value) / 1000
+					break
+				}
+			}
+		}
+	}
+	if gpu.PowerDraw <= 0 {
+		if powerFiles, err := filepath.Glob(filepath.Join(deviceDir, "hwmon", "hwmon*", "power1_average")); err == nil {
+			for _, path := range powerFiles {
+				if value := readUintFromFile(path); value > 0 {
+					gpu.PowerDraw = float64(value) / 1_000_000
+					break
+				}
+			}
+		}
+	}
+	if gpu.Clock <= 0 {
+		if clockFiles, err := filepath.Glob(filepath.Join(deviceDir, "hwmon", "hwmon*", "freq1_input")); err == nil {
+			for _, path := range clockFiles {
+				if value := readUintFromFile(path); value > 0 {
+					gpu.Clock = float64(value) / 1_000_000
+					break
+				}
+			}
+		}
+	}
+	if gpu.PCIBusID == "" {
+		if data, err := os.ReadFile(filepath.Join(deviceDir, "uevent")); err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				if strings.HasPrefix(line, "PCI_SLOT_NAME=") {
+					gpu.PCIBusID = strings.TrimSpace(strings.TrimPrefix(line, "PCI_SLOT_NAME="))
+					break
+				}
+			}
+		}
+	}
+	gpu.PowerPct = safeDiv(gpu.PowerDraw, gpu.PowerLimit) * 100
+}
+
+func readUintFromFile(path string) uint64 {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	value, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return value
 }
 
 func (c *GPUCollector) getAMDGPUName() string {
@@ -370,7 +489,7 @@ func (c *GPUCollector) getAMDGPUName() string {
 	if err != nil {
 		return "AMD GPU"
 	}
-	if m := regexp.MustCompile(`Card series\s*:\s*(.+)`).FindStringSubmatch(string(out)); len(m) > 1 {
+	if m := regexp.MustCompile(`(?i)Card Series\s*:\s*(.+)`).FindStringSubmatch(string(out)); len(m) > 1 {
 		return strings.TrimSpace(m[1])
 	}
 	return "AMD GPU"
