@@ -336,6 +336,11 @@ func (c *GPUCollector) parseRocmSMI(output string) *shared.GPUMetrics {
 	// GPU utilization
 	if m := regexp.MustCompile(`GPU use \(%\)\s*:\s*([\d.]+)`).FindStringSubmatch(output); len(m) > 1 {
 		gpu.Util = parseFloat64(m[1])
+		// ROCm reports a numeric value even when the current utilization is
+		// zero. Keep that distinction so the UI does not mistake an idle GPU
+		// for a driver that cannot provide utilization telemetry.
+		supported := true
+		gpu.UtilSupported = &supported
 	}
 
 	// Memory. ROCm 7 reports VRAM counters as "VRAM ... (B)" while older
@@ -841,6 +846,16 @@ func (c *GPUCollector) aggregate(gpus []shared.GPUMetrics) *shared.GPUMetrics {
 		if agg.FanSpeed == nil && g.FanSpeed != nil {
 			agg.FanSpeed = g.FanSpeed
 		}
+	}
+	utilSupported := true
+	for _, g := range gpus {
+		if g.UtilSupported == nil || !*g.UtilSupported {
+			utilSupported = false
+			break
+		}
+	}
+	if utilSupported {
+		agg.UtilSupported = &utilSupported
 	}
 
 	n := float64(len(gpus))

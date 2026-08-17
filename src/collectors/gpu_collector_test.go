@@ -21,6 +21,9 @@ GPU[0] : VRAM Total Used Memory (B): 36041191424`)
 	if got == nil {
 		t.Fatal("parsed GPU is nil")
 	}
+	if got.Util != 0 || got.UtilSupported == nil || !*got.UtilSupported {
+		t.Fatalf("utilization=%v supported=%v want numeric zero with supported=true", got.Util, got.UtilSupported)
+	}
 	if got.MemTotal < 65535 || got.MemUsed < 34370 || got.MemFree < 31164 {
 		t.Fatalf("memory=%+v want approximately 65536/34371/31165 MB", got)
 	}

@@ -5,6 +5,7 @@ type GPUMetrics struct {
 	Index         int          `json:"index"`
 	Name          string       `json:"name"`
 	Util          float64      `json:"util"`
+	UtilSupported *bool        `json:"util_supported,omitempty"`
 	MemUsed       float64      `json:"mem_used"`
 	MemTotal      float64      `json:"mem_total"`
 	MemFree       float64      `json:"mem_free"`
