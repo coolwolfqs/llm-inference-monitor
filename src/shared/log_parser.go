@@ -144,6 +144,7 @@ func ParseLlamaLogsEx(logPath string, maxEntries int, logFileModTime int64) ([]L
 		var promptMs float64
 		var promptTokens int
 		var evalTokens int
+		var evalMs float64
 		var tps float64
 
 		// LOOK BACKWARDS for prompt/eval lines
@@ -155,11 +156,15 @@ func ParseLlamaLogsEx(logPath string, maxEntries int, logFileModTime int64) ([]L
 			}
 			if !strings.Contains(nextLine, "prompt eval") {
 				if em := logEvalRe.FindStringSubmatch(nextLine); len(em) >= 3 {
+					evalMs, _ = strconv.ParseFloat(em[1], 64)
 					evalTokens, _ = strconv.Atoi(em[2])
 					// Only eval timing carries generation throughput. Prompt
 					// processing progress lines must not overwrite this value.
 					if tm := logTPSRe.FindStringSubmatch(nextLine); len(tm) >= 2 {
-						tps, _ = strconv.ParseFloat(tm[1], 64)
+						parsedTPS, _ := strconv.ParseFloat(tm[1], 64)
+						if IsReliableEvalSample(evalMs, evalTokens, parsedTPS) {
+							tps = parsedTPS
+						}
 					}
 				}
 			}

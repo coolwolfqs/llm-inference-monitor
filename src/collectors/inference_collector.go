@@ -75,7 +75,9 @@ func (c *InferenceCollector) Collect(ctx context.Context) (interface{}, error) {
 	statsErr := c.http.GetJSONContext(ctx, statsURL, &statsData)
 	if statsErr == nil {
 		if v, ok := statsData["tokens_predicted_per_second"].(float64); ok {
-			result.LastTPS = v
+			if shared.IsReliableTPS(v) {
+				result.LastTPS = v
+			}
 		}
 		if v, ok := statsData["slots_avg_processing_ms"].(float64); ok {
 			result.LastLatencyMs = v
@@ -138,8 +140,8 @@ func (c *InferenceCollector) parsePrometheusMetrics(ctx context.Context, baseURL
 
 	result.LastPromptTokens = int(metrics["llamacpp:prompt_tokens_total"])
 	result.LastEvalTokens = int(metrics["llamacpp:tokens_predicted_total"])
-	result.LastTPS = metrics["llamacpp:predicted_tokens_seconds"]
-	if result.LastTPS > 0 {
+	if value := metrics["llamacpp:predicted_tokens_seconds"]; shared.IsReliableTPS(value) {
+		result.LastTPS = value
 		result.LastLatencyMs = 1000.0 / result.LastTPS
 	}
 	result.KVCacheUsedPct = metrics["llamacpp:kv_cache_usage_ratio"] * 100

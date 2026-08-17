@@ -46,6 +46,7 @@ var buildTree = "unknown"
 var buildTime = "unknown"
 var buildState = "unknown"
 var artifactSHA256 = "unknown"
+
 const releaseVersion = "v0.5"
 
 // The alert engine is process-owned so the status endpoint can expose the
@@ -1311,7 +1312,9 @@ func collectInferenceData(cfg *shared.Config, hc *shared.HTTPClient) *shared.Inf
 	var statsData map[string]interface{}
 	if err := hc.GetJSON(statsURL, &statsData); err == nil {
 		if v, ok := statsData["tokens_predicted_per_second"].(float64); ok {
-			m.LastTPS = v
+			if shared.IsReliableTPS(v) {
+				m.LastTPS = v
+			}
 		}
 		if v, ok := statsData["slots_avg_processing_ms"].(float64); ok {
 			m.LastLatencyMs = v
@@ -1403,7 +1406,7 @@ func parseTimingFromLog(m *shared.InferenceMetrics, cfg *shared.Config) *shared.
 					tok, _ := strconv.Atoi(em[2])
 					m.LastEvalMs = ms
 					m.LastEvalTokens = tok
-					if ms > 0 {
+					if shared.IsReliableEvalSample(ms, tok, float64(tok)/ms*1000) {
 						m.LastTPS = float64(tok) / ms * 1000
 					}
 				}
@@ -1446,7 +1449,7 @@ func collectLLMData(cfg *shared.Config, hc *shared.HTTPClient) *shared.LLMMetric
 		m.PromptTokensPS = v
 		m.PromptMsPerToken = 1000.0 / v
 	}
-	if v, ok := metrics["llamacpp:predicted_tokens_seconds"]; ok && v > 0 {
+	if v, ok := metrics["llamacpp:predicted_tokens_seconds"]; ok && shared.IsReliableTPS(v) {
 		m.TPOT = 1000.0 / v
 	}
 	if v, ok := metrics["llamacpp:speculative_accept_rate"]; ok {
@@ -4133,7 +4136,9 @@ func buildV2Sections(cfg *shared.Config, httpClient *shared.HTTPClient) gin.H {
 		}
 	}
 	if inf != nil {
-		llmSection["gen_tps"] = inf.LastTPS
+		if shared.IsReliableTPS(inf.LastTPS) {
+			llmSection["gen_tps"] = inf.LastTPS
+		}
 		llmSection["prompt_tokens"] = inf.LastPromptTokens
 		llmSection["eval_tokens"] = inf.LastEvalTokens
 	}
@@ -4147,10 +4152,14 @@ func buildV2Sections(cfg *shared.Config, httpClient *shared.HTTPClient) gin.H {
 			llmSection["last_request_prompt_tokens"] = latest.PromptTokens
 			llmSection["prompt_ms_per_token"] = latest.PromptMs / float64(latest.PromptTokens)
 		}
-		if latest.TPS > 0 && latest.EvalTokens > 0 {
-			llmSection["eval_ms"] = float64(latest.EvalTokens) / latest.TPS * 1000
+		latestEvalMs := float64(0)
+		if latest.TPS > 0 {
+			latestEvalMs = float64(latest.EvalTokens) / latest.TPS * 1000
+		}
+		if shared.IsReliableEvalSample(latestEvalMs, latest.EvalTokens, latest.TPS) {
+			llmSection["eval_ms"] = latestEvalMs
 			llmSection["eval_tokens"] = latest.EvalTokens
-			llmSection["last_request_eval_ms"] = float64(latest.EvalTokens) / latest.TPS * 1000
+			llmSection["last_request_eval_ms"] = latestEvalMs
 			llmSection["last_request_eval_tokens"] = latest.EvalTokens
 			llmSection["last_request_tpot_ms"] = 1000 / latest.TPS
 			llmSection["gen_tps"] = latest.TPS
