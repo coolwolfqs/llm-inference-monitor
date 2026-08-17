@@ -146,15 +146,25 @@ const selectedProfileLabel = computed(() => {
   const comparisons: Array<[string, unknown]> = [
     ['ctx_size', form.ctx_size],
     ['concurrency', form.concurrency],
+    ['ngl', form.ngl],
     ['batch', form.batch],
     ['ubatch', form.ubatch],
+    ['threads', form.threads],
+    ['threads_http', form.threads_http],
     ['device', form.device],
+    ['fit', form.fit],
     ['k_cache_type', form.k_cache_type],
     ['v_cache_type', form.v_cache_type],
     ['flash_attn', form.flash_attn],
     ['chunked_batch', form.chunked_batch],
     ['spec_draft_n_max', form.spec_draft_n_max],
-    ['fit', form.fit],
+    ['spec_draft_p_min', form.spec_draft_p_min],
+    ['kv_unified', form.kv_unified],
+    ['cache_reuse', form.cache_reuse],
+    ['spec_type', form.spec_type],
+    ['reasoning', form.reasoning],
+    ['mmproj', Boolean(form.mmproj_file)],
+    ['temp', form.temp],
   ]
   const matches = comparisons.every(([key, actual]) => planned[key] === undefined || comparisonValue(key, planned[key]) === comparisonValue(key, actual))
   if (!matches) return '自定义调度'
@@ -558,8 +568,16 @@ watch(mtpEnabled, (enabled) => {
   if (enabled) form.draft_model_id = ''
 }, { flush: 'sync' })
 
+watch([mtpEnabled, ngramEnabled], ([mtp, ngram]) => {
+  form.spec_type = mtp && ngram ? 'draft-mtp,ngram-mod' : mtp ? 'draft-mtp' : ngram ? 'ngram-mod' : 'none'
+}, { flush: 'sync' })
+
 watch(() => form.draft_model_id, (value) => {
   if (value) mtpEnabled.value = false
+}, { flush: 'sync' })
+
+watch(() => form.mmproj_file, (value) => {
+  form.mmproj = Boolean(value)
 }, { flush: 'sync' })
 
 watch(() => form.concurrency, clampContextToConcurrency, { flush: 'sync' })
@@ -672,58 +690,68 @@ async function submit() {
           </details>
         </section>
 
-        <section class="form-section">
-          <h3>基础配置</h3>
+        <section class="form-section model-parameters-section">
+          <h3>模型参数 <span class="section-note">模型能力与推理行为</span></h3>
           <div class="form-grid">
             <label data-field="ctx_size"><span>上下文大小</span><select v-model.number="form.ctx_size"><option v-for="size in visibleContextOptions" :key="size" :value="size">{{ size >= 1048576 ? '1024K' : `${size / 1024}K` }}</option></select><small>上限 {{ Math.round(contextLimit / 1024) }}K（模型窗口 × 并发数）</small></label>
-            <label data-field="concurrency"><span>并发数</span><select v-model.number="form.concurrency"><option v-for="n in 4" :key="n" :value="n">{{ n }}</option></select></label>
+            <label data-field="concurrency"><span>并发数</span><select v-model.number="form.concurrency"><option v-for="n in 4" :key="n" :value="n">{{ n }}</option></select><small>并发越高，单请求可用上下文越小</small></label>
           </div>
           <label class="full-field reasoning-field" data-field="reasoning"><span>思考模式</span><select v-model="form.reasoning"><option value="off">关闭思考模式</option><option value="on">开启思考模式</option><option value="auto">自动</option></select><small>关闭后不输出思考过程；自动由模型或引擎决定</small></label>
-          <p class="section-default">默认：按模型能力 × 引擎推荐 profile 生成；已保存的本模型配置优先恢复。</p>
+          <label v-if="supportsEngineParameter('mmproj') && (projectors.length || form.mmproj_file)" class="full-field model-artifact-field" data-field="mmproj"><span>视觉投影</span><select v-model="form.mmproj_file"><option value="">不加载视觉投影</option><option v-for="projector in projectors" :key="projector.id" :value="projector.id">{{ projector.name }} · {{ Math.round(projector.size / 1024 / 1024) }}MB</option></select><small>{{ projectors.length ? '仅展示当前模型目录的匹配项，默认选择最佳匹配' : '当前模型没有可匹配的视觉投影' }}</small></label>
+          <div v-if="supportsMtp || ngramAvailable || engineSupportsDraft" class="form-grid enhancement-params">
+            <label data-field="spec_type"><span>投机解码</span><select v-model="speculationMode"><option v-for="option in speculationModeOptions" :key="option.value" :value="option.value" :disabled="option.disabled">{{ option.label }}</option></select><small>{{ supportsMtp ? '模型已识别 MTP，默认 MTP' : '模型未识别 MTP，默认关闭' }}</small></label>
+            <label v-if="mtpEnabled || form.draft_model_id" data-field="spec_draft_n_max"><span>预测 token 数</span><input v-model.number="form.spec_draft_n_max" type="number" min="1" max="32" /></label>
+            <label v-if="(mtpEnabled || form.draft_model_id) && supportsEngineParameter('spec_draft_p_min')" data-field="spec_draft_p_min"><span>接受阈值</span><input v-model.number="form.spec_draft_p_min" type="number" min="0" max="1" step="0.01" /><small>推荐 {{ recommendedValue({ key: 'spec_draft_p_min' }) }}</small></label>
+            <label v-if="ngramEnabled" data-field="ngram_mod_n_match"><span>n-gram 匹配长度</span><input v-model.number="form.ngram_mod_n_match" type="number" min="1" max="256" /></label>
+          </div>
+          <p class="section-default">模型相关选项只在预检确认可用时显示；默认值来自模型能力与当前引擎 profile。</p>
           <details class="inline-details">
-            <summary>更多基础配置 <ChevronDown :size="15" /></summary>
-            <div class="form-grid">
-              <label><span>GPU 层数</span><input v-model.number="form.ngl" type="number" min="1" max="99" /></label>
-              <label><span>GPU</span><input v-model="form.gpu" /></label>
+            <summary>更多模型参数 <ChevronDown :size="15" /></summary>
+            <label v-if="draftModels.length || engineSupportsDraft" class="full-field draft-model-field"><span>外置草稿模型</span><select v-model="form.draft_model_id" :disabled="!draftAvailable || mtpEnabled"><option value="">不使用外置草稿模型</option><option v-for="draft in draftModels" :key="draft.id" :value="draft.id">{{ draft.name }} · {{ draft.size_human }}</option></select><small>{{ mtpEnabled ? '当前使用 MTP；切换到 n-gram 或关闭后可选外置草稿模型' : draftAvailable ? '仅展示当前模型目录或模型族的草稿模型' : '未发现可用草稿模型' }}</small></label>
+            <div v-if="ngramEnabled" class="form-grid">
+              <label data-field="ngram_mod_n_min"><span>n-gram 最小长度</span><input v-model.number="form.ngram_mod_n_min" type="number" min="1" max="256" /></label>
+              <label data-field="ngram_mod_n_max"><span>n-gram 最大长度</span><input v-model.number="form.ngram_mod_n_max" type="number" min="1" max="256" /></label>
             </div>
-            <label class="full-field"><span>视觉模型</span><select v-model="form.mmproj_file"><option value="">不加载视觉模型</option><option v-for="projector in projectors" :key="projector.id" :value="projector.id">{{ projector.name }} · {{ Math.round(projector.size / 1024 / 1024) }}MB</option></select><small>{{ projectors.length ? '仅展示当前模型目录的匹配项，默认选择最佳匹配' : '当前模型目录没有可匹配的视觉模型' }}</small></label>
-            <div class="form-grid enhancement-params">
-<label><span>投机解码</span><select v-model="speculationMode"><option v-for="option in speculationModeOptions" :key="option.value" :value="option.value" :disabled="option.disabled">{{ option.label }}</option></select><small>{{ supportsMtp ? '模型已识别 MTP，默认 MTP' : '模型未识别 MTP，默认关闭' }}</small></label>
-              <label v-if="mtpEnabled || form.draft_model_id" data-field="spec_draft_n_max"><span>预测 token 数</span><input v-model.number="form.spec_draft_n_max" type="number" min="1" max="32" /></label>
-              <label v-if="(mtpEnabled || form.draft_model_id) && supportsEngineParameter('spec_draft_p_min')" data-field="spec_draft_p_min"><span>接受阈值</span><input v-model.number="form.spec_draft_p_min" type="number" min="0" max="1" step="0.01" /><small>推荐 {{ recommendedValue({ key: 'spec_draft_p_min' }) }}</small></label>
-              <label v-if="ngramEnabled" data-field="ngram_mod_n_match"><span>n-gram 匹配长度</span><input v-model.number="form.ngram_mod_n_match" type="number" min="1" max="256" /></label>
-            </div>
-            <label v-if="draftModels.length || engineSupportsDraft" class="full-field draft-model-field"><span>草稿模型</span><select v-model="form.draft_model_id" :disabled="!draftAvailable || mtpEnabled"><option value="">不使用外置草稿模型</option><option v-for="draft in draftModels" :key="draft.id" :value="draft.id">{{ draft.name }} · {{ draft.size_human }}</option></select><small>{{ mtpEnabled ? '当前使用 MTP；切换到 n-gram 或关闭后可选外置草稿模型' : draftAvailable ? '仅展示当前模型目录或模型族的草稿模型' : '未发现可用草稿模型' }}</small></label>
+            <p v-if="!draftModels.length && !engineSupportsDraft && !ngramEnabled" class="parameter-panel-help">当前模型没有额外模型参数。</p>
           </details>
         </section>
 
+        <section class="form-section engine-parameters-section">
+          <h3>引擎参数 <span class="section-note">通用性能与资源</span></h3>
+          <div class="form-grid core-engine-grid">
+            <label v-if="supportsEngineParameter('ngl')" data-field="ngl"><span>GPU 层数</span><input v-model.number="form.ngl" type="number" min="1" max="99" /><small>影响模型加载到 GPU 的比例</small></label>
+            <label v-if="supportsEngineParameter('device')" data-field="device"><span>GPU 设备</span><select v-if="engineParameter('device')?.values?.length" v-model="form.device"><option v-for="value in engineParameter('device')?.values" :key="value" :value="value">{{ value }}</option></select><input v-else v-model="form.device" placeholder="Vulkan0" /><small>实际生效的引擎设备，随引擎自动填充</small></label>
+            <label v-if="supportsEngineParameter('fit')" data-field="fit"><span>Fit 模式</span><select v-model="form.fit"><option value="">默认</option><option value="on">on</option><option value="off">off</option></select></label>
+            <label v-if="supportsEngineParameter('batch')" data-field="batch"><span>Batch</span><input v-model.number="form.batch" type="number" min="1" /></label>
+            <label v-if="supportsEngineParameter('ubatch')" data-field="ubatch"><span>Ubatch</span><input v-model.number="form.ubatch" type="number" min="1" /></label>
+            <label v-if="supportsEngineParameter('threads')" data-field="threads"><span>CPU 线程</span><input v-model.number="form.threads" type="number" min="1" /></label>
+            <label v-if="supportsEngineParameter('k_cache_type')" data-field="k_cache_type"><span>K Cache</span><select v-model="form.k_cache_type"><option v-for="v in cacheTypes" :key="v" :value="v">{{ v }}</option></select></label>
+            <label v-if="supportsEngineParameter('v_cache_type')" data-field="v_cache_type"><span>V Cache</span><select v-model="form.v_cache_type"><option v-for="v in cacheTypes" :key="v" :value="v">{{ v }}</option></select></label>
+          </div>
+          <div class="switch-list core-switch-list">
+            <label v-if="supportsEngineParameter('flash_attn')"><input v-model="form.flash_attn" type="checkbox" /><span>Flash Attention</span></label>
+            <label v-if="supportsEngineParameter('chunked_batch')"><input v-model="form.chunked_batch" type="checkbox" /><span>连续批处理</span></label>
+            <label v-if="supportsEngineParameter('kv_unified')"><input v-model="form.kv_unified" type="checkbox" /><span>统一 KV Cache</span></label>
+          </div>
+          <p class="section-default">profile {{ selectedProfileLabel }}：修改上述任一核心参数后会标记为自定义调度。</p>
+        </section>
+
         <details class="advanced-panel">
-          <summary>高级参数 <ChevronDown :size="16" /></summary>
-          <p class="parameter-panel-help">这里仅放所有引擎通用的性能、KV Cache、加载和服务参数；不支持的字段会自动隐藏。</p>
+          <summary>更多通用参数 <ChevronDown :size="16" /></summary>
+          <p class="parameter-panel-help">低频的缓存、加载、生成和服务参数按引擎 schema 展开；不支持的字段会自动隐藏。</p>
           <div class="form-grid advanced-grid">
-            <label><span>K Cache</span><select v-model="form.k_cache_type"><option v-for="v in cacheTypes" :key="v" :value="v">{{ v }}</option></select></label>
-            <label><span>V Cache</span><select v-model="form.v_cache_type"><option v-for="v in cacheTypes" :key="v" :value="v">{{ v }}</option></select></label>
             <template v-if="showDraftCache">
               <label><span>MTP/Draft K Cache</span><select v-model="form.draft_k_cache_type"><option v-for="v in draftCacheTypes" :key="v" :value="v">{{ v }}</option></select></label>
               <label><span>MTP/Draft V Cache</span><select v-model="form.draft_v_cache_type"><option v-for="v in draftCacheTypes" :key="v" :value="v">{{ v }}</option></select></label>
             </template>
-            <label><span>Batch</span><input v-model.number="form.batch" type="number" /></label>
-            <label><span>Ubatch</span><input v-model.number="form.ubatch" type="number" /></label>
-            <label><span>CPU 线程</span><input v-model.number="form.threads" type="number" /></label>
-            <label><span>温度</span><input v-model.number="form.temp" type="number" step="0.1" /></label>
-            <label><span>Cache RAM (MiB)</span><input v-model.number="form.cache_ram" type="number" /></label>
-            <label><span>空闲休眠 (秒)</span><input v-model.number="form.sleep_idle_seconds" type="number" /></label>
-            <template v-if="selectedEngine && engineParameterSchema.length">
-              <label v-if="supportsEngineParameter('device')"><span>设备</span><select v-if="engineParameter('device')?.values?.length" v-model="form.device"><option v-for="value in engineParameter('device')?.values" :key="value" :value="value">{{ value }}</option></select><input v-else v-model="form.device" placeholder="Vulkan0" /><small>统一设备参数，按引擎自动填充</small></label>
-              <label v-if="supportsEngineParameter('fit')" data-field="fit"><span>Fit 模式</span><select v-model="form.fit"><option value="">默认</option><option value="on">on</option><option value="off">off</option></select></label>
-              <label v-if="supportsEngineParameter('cache_reuse')"><span>Cache reuse</span><input v-model.number="form.cache_reuse" type="number" min="0" max="1048576" /></label>
-            </template>
+            <label v-if="supportsEngineParameter('cache_reuse')"><span>Cache reuse</span><input v-model.number="form.cache_reuse" type="number" min="0" max="1048576" /></label>
+            <label v-if="supportsEngineParameter('cache_ram')"><span>Cache RAM (MiB)</span><input v-model.number="form.cache_ram" type="number" min="0" /></label>
+            <label v-if="supportsEngineParameter('temp')"><span>温度</span><input v-model.number="form.temp" type="number" step="0.1" /></label>
+            <label v-if="supportsEngineParameter('threads_http')"><span>HTTP 线程</span><input v-model.number="form.threads_http" type="number" min="1" /></label>
+            <label v-if="supportsEngineParameter('sleep_idle_seconds')"><span>空闲休眠 (秒)</span><input v-model.number="form.sleep_idle_seconds" type="number" min="0" /></label>
           </div>
           <div class="switch-list">
-            <label><input v-model="form.flash_attn" type="checkbox" /><span>Flash Attention</span></label>
-            <label><input v-model="form.chunked_batch" type="checkbox" /><span>连续批处理</span></label>
-            <label><input v-model="form.ui" type="checkbox" /><span>Web UI</span></label>
-            <label v-if="supportsEngineParameter('kv_unified')"><input v-model="form.kv_unified" type="checkbox" /><span>统一 KV Cache（引擎推荐）</span></label>
+            <label v-if="supportsEngineParameter('ui')"><input v-model="form.ui" type="checkbox" /><span>Web UI</span></label>
           </div>
           <section v-for="group in advancedParameterGroups" :key="group.name" class="parameter-group">
             <h4>{{ group.name }}</h4>

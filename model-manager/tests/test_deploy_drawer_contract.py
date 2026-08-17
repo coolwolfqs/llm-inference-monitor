@@ -53,10 +53,24 @@ class DeployDrawerContractTests(unittest.TestCase):
         self.assertIn('<option value="off">关闭思考模式</option>', self.source)
 
     def test_advanced_sections_use_compact_titles(self):
-        self.assertIn("<summary>高级参数 <ChevronDown", self.source)
+        self.assertIn("<summary>更多通用参数 <ChevronDown", self.source)
+        self.assertIn("<summary>更多模型参数 <ChevronDown", self.source)
         self.assertIn("<summary>拓展配置 <ChevronDown", self.source)
         self.assertNotIn("高级参数（共性）", self.source)
         self.assertNotIn("拓展配置（引擎/模型）", self.source)
+
+    def test_core_parameters_are_split_by_model_and_engine_scope(self):
+        self.assertIn('<h3>模型参数 <span class="section-note">模型能力与推理行为</span></h3>', self.source)
+        self.assertIn('<h3>引擎参数 <span class="section-note">通用性能与资源</span></h3>', self.source)
+        for key in ("ngl", "device", "batch", "ubatch", "threads", "k_cache_type", "v_cache_type"):
+            self.assertIn(f'data-field="{key}"', self.source)
+        self.assertIn("实际生效的引擎设备", self.source)
+        self.assertNotIn('<span>GPU</span><input v-model="form.gpu"', self.source)
+
+    def test_profile_label_covers_visible_core_overrides(self):
+        for key in ("ngl", "threads", "spec_type", "reasoning", "mmproj", "temp"):
+            self.assertIn(f"['{key}'", self.source)
+        self.assertIn("修改上述任一核心参数后会标记为自定义调度", self.source)
 
 
 if __name__ == "__main__":
