@@ -1273,6 +1273,7 @@ def _list_mmproj_files():
                 "path": item["path"],
                 "size": item["size"],
                 "family": item.get("family"),
+                "relative_path": item.get("relative_path", ""),
                 "relative_dir": item.get("relative_dir", ""),
             }
         )
@@ -1946,6 +1947,11 @@ def parse_script_config(content=""):
     }
 
 # SUDO_PW removed: using sudoers NOPASSWD whitelist
+# systemctl restart waits for the supervised unit to stop and start. The
+# inference unit allows up to 90 seconds for a graceful stop, so a 30-second
+# subprocess timeout can report a false deployment failure while systemd is
+# still completing the requested switch.
+INFERENCE_RESTART_COMMAND_TIMEOUT = 180
 
 def sudo_run(cmd, timeout=15):
     """Run sudo commands (NOPASSWD whitelist configured)"""
@@ -2077,7 +2083,10 @@ def _wait_for_inference(expected_model_path="", expected_engine="", timeout=180)
 
 def restart_llama_server(expected_model_path="", expected_engine=""):
     """Restart the supervised unit and return only after observed readiness."""
-    _checked_sudo(["systemctl", "restart", "inference-server"], timeout=30)
+    _checked_sudo(
+        ["systemctl", "restart", "inference-server"],
+        timeout=INFERENCE_RESTART_COMMAND_TIMEOUT,
+    )
     return _wait_for_inference(expected_model_path, expected_engine)
 
 def _switch_and_restart(llama_version, expected_model_path=""):
