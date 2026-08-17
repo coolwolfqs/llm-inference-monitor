@@ -74,7 +74,7 @@ func (c *LLMMonitor) Collect(ctx context.Context) (interface{}, error) {
 		result.PromptMsPerToken = 1000.0 / v
 	}
 
-	if v, ok := metrics["llamacpp:predicted_tokens_seconds"]; ok && v > 0 {
+	if v, ok := metrics["llamacpp:predicted_tokens_seconds"]; ok && shared.IsReliableTPS(v) {
 		tpot := 1000.0 / v
 		result.TPOT = tpot
 		c.tpotHistory = append(c.tpotHistory, tpot)
