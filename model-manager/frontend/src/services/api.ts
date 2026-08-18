@@ -32,31 +32,12 @@ export const api = {
   models: () => request<ModelsResponse>('/models'),
   engines: async () => (await request<{ engines: Engine[] }>('/engines')).engines,
   operations: async () => (await request<{ operations: Operation[] }>('/operations?limit=20')).operations,
-  preflight: async (id: string) => {
-    try {
-      return await request<Preflight>(`/models/preflight/${encodeURIComponent(id)}`)
-    } catch (cause) {
-      // Compatibility for the currently deployed reverse proxy, which drops
-      // query strings on this prefix. Remove after all nodes expose the path route.
-      if (cause instanceof Error && (cause.message.includes('404') || cause.message === 'Not Found')) {
-        return request<Preflight>(`/models/preflight%3Fmodel_id=${encodeURIComponent(id)}`)
-      }
-      throw cause
-    }
-  },
+  preflight: (id: string) => request<Preflight>(`/models/preflight/${encodeURIComponent(id)}`),
   deploymentPlan: (modelId: string, engineKey: string, profileId = 'default') => request<DeploymentPlan>(
     `/models/deployment-plan/${encodeURIComponent(modelId)}/${encodeURIComponent(engineKey)}/${encodeURIComponent(profileId)}`,
   ),
-  projectors: async (id: string) => {
-    try {
-      return (await request<{ files: ProjectionArtifact[] }>(`/models/mmproj-files/${encodeURIComponent(id)}`)).files
-    } catch (cause) {
-      if (cause instanceof Error && (cause.message.includes('404') || cause.message === 'Not Found')) {
-        return (await request<{ files: ProjectionArtifact[] }>(`/models/mmproj-files%3Fmodel_id=${encodeURIComponent(id)}`)).files
-      }
-      throw cause
-    }
-  },
+  projectors: async (id: string) =>
+    (await request<{ files: ProjectionArtifact[] }>(`/models/mmproj-files/${encodeURIComponent(id)}`)).files,
   quickSwitch: () => request<{ favorites: string[]; recent: string[] }>('/quick-switch'),
   toggleFavorite: (name: string) => request<{ favorites: string[] }>('/quick-switch/toggle-fav', { method: 'POST', body: JSON.stringify({ name }) }),
   stop: () => request<{ stopped: boolean; message?: string }>('/models/stop', { method: 'POST' }),
